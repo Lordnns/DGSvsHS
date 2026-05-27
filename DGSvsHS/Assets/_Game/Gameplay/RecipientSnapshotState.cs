@@ -20,23 +20,36 @@ namespace DGSvsHS.Gameplay
 
         private readonly List<PendingEntry> _pending = new List<PendingEntry>();
         private readonly Stack<HashSet<ushort>> _setPool = new Stack<HashSet<ushort>>();
+        
+        private readonly List<ushort> _keysScratch = new List<ushort>(4096);
+        
+        private const int MaxPending = Constants.MaxDeltaDepth * 2;
 
         private HashSet<ushort> RentSet() => _setPool.Count > 0 ? _setPool.Pop() : new HashSet<ushort>();
         private void ReturnSet(HashSet<ushort> s) { s.Clear(); _setPool.Push(s); }
-        
+
         public void OnSnapshotSent(uint tick, bool isFull, HashSet<ushort> included, IReadOnlyList<ushort> removed)
         {
+            while (_pending.Count >= MaxPending)
+            {
+                var dropped = _pending[0];
+                ReturnSet(dropped.Included);
+                ReturnSet(dropped.Removed);
+                _pending.RemoveAt(0);
+            }
+
             var incCopy = RentSet();
             foreach (var id in included) incCopy.Add(id);
             var remCopy = RentSet();
             for (int i = 0; i < removed.Count; i++) remCopy.Add(removed[i]);
             _pending.Add(new PendingEntry { Tick = tick, IsFull = isFull, Included = incCopy, Removed = remCopy });
 
-            // Staleness maintenance for already-confirmed ids
-            var keys = new List<ushort>(TicksSinceLastSent.Keys);
-            for (int i = 0; i < keys.Count; i++)
+            // Staleness maintenance for already-confirmed ids.
+            _keysScratch.Clear();
+            foreach (var k in TicksSinceLastSent.Keys) _keysScratch.Add(k);
+            for (int i = 0; i < _keysScratch.Count; i++)
             {
-                ushort id = keys[i];
+                ushort id = _keysScratch[i];
                 if (included.Contains(id)) TicksSinceLastSent[id] = 0;
                 else
                 {
