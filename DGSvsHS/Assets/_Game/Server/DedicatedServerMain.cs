@@ -66,6 +66,13 @@ namespace DGSvsHS.Server
         // Transition detection — round/phase changes.
         private RoundPhase _prevPhase = RoundPhase.PreGame;
         private int _prevRound = -1;
+        
+        private EntityQuery _worldClockQuery;
+        private EntityQuery _roundStateQuery;
+        private EntityQuery _godModeQuery;
+        private EntityQuery _enemyTagQuery;
+        private EntityQuery _playerTagQuery;
+        private EntityQuery _playerSlotQuery;
 
         // ---------- Lifecycle ----------
 
@@ -99,6 +106,15 @@ namespace DGSvsHS.Server
 
             // Initial world state: globals + RNG seed.
             SimBootstrap.CreateOrResetGlobals(_simWorld.EntityManager, Seed);
+            
+            var em = _simWorld.EntityManager;
+            _worldClockQuery = em.CreateEntityQuery(ComponentType.ReadOnly<WorldClock>());
+            _roundStateQuery = em.CreateEntityQuery(ComponentType.ReadWrite<RoundState>());
+            _godModeQuery    = em.CreateEntityQuery(ComponentType.ReadWrite<GodModeFlag>());
+            _enemyTagQuery   = em.CreateEntityQuery(ComponentType.ReadOnly<EnemyTag>());
+            _playerTagQuery  = em.CreateEntityQuery(ComponentType.ReadOnly<PlayerTag>());
+            _playerSlotQuery = em.CreateEntityQuery(ComponentType.ReadOnly<PlayerSlot>(), ComponentType.ReadOnly<PlayerTag>());
+
             SetGodMode(GodMode);
 
             _history = new WorldStateHistory(Constants.SnapshotHistoryTicks);
@@ -163,9 +179,8 @@ namespace DGSvsHS.Server
         private uint GetCurrentTick()
         {
             if (_simWorld == null || !_simWorld.IsCreated) return 0;
-            var q = _simWorld.EntityManager.CreateEntityQuery(ComponentType.ReadOnly<WorldClock>());
-            if (q.CalculateEntityCount() == 0) return 0;
-            return q.GetSingleton<WorldClock>().Tick;
+            if (_worldClockQuery.CalculateEntityCount() == 0) return 0;
+            return _worldClockQuery.GetSingleton<WorldClock>().Tick;
         }
 
         // ---------- Main loop ----------
@@ -250,10 +265,8 @@ namespace DGSvsHS.Server
 
         private void SetGodMode(bool on)
         {
-            var em = _simWorld.EntityManager;
-            var q = em.CreateEntityQuery(ComponentType.ReadWrite<GodModeFlag>());
-            if (q.CalculateEntityCount() == 0) return;
-            q.SetSingleton(new GodModeFlag { Value = (byte)(on ? 1 : 0) });
+            if (_godModeQuery.CalculateEntityCount() == 0) return;
+            _godModeQuery.SetSingleton(new GodModeFlag { Value = (byte)(on ? 1 : 0) });
         }
 
         // ---------- NGO callbacks ----------
@@ -289,8 +302,7 @@ namespace DGSvsHS.Server
         private void OnClientDisconnected(byte playerId, DisconnectReason reason)
         {
             var em = _simWorld.EntityManager;
-            var q = em.CreateEntityQuery(ComponentType.ReadOnly<PlayerSlot>(), ComponentType.ReadOnly<PlayerTag>());
-            var ents = q.ToEntityArray(Unity.Collections.Allocator.Temp);
+            var ents = _playerSlotQuery.ToEntityArray(Unity.Collections.Allocator.Temp);
             try
             {
                 for (int i = 0; i < ents.Length; i++)
@@ -308,8 +320,7 @@ namespace DGSvsHS.Server
             Debug.Log($"[Server] Player {playerId} disconnected: {reason}");
 
             // Last client out → Resetting (next-frame wipe + back to Idle).
-            int remaining = em.CreateEntityQuery(ComponentType.ReadOnly<PlayerTag>()).CalculateEntityCount();
-            if (remaining == 0 && _state == ServerLifecycle.Running)
+            if (_playerTagQuery.CalculateEntityCount() == 0 && _state == ServerLifecycle.Running)
             {
                 TransitionTo(ServerLifecycle.Resetting, "last client disconnected");
             }
@@ -318,9 +329,8 @@ namespace DGSvsHS.Server
         private void OnInputReceived(byte playerId, InputCmd cmd)
         {
             var em = _simWorld.EntityManager;
-            var clockQ = em.CreateEntityQuery(ComponentType.ReadOnly<WorldClock>());
-            if (clockQ.CalculateEntityCount() == 0) return;
-            var globals = clockQ.GetSingletonEntity();
+            if (_worldClockQuery.CalculateEntityCount() == 0) return;
+            var globals = _worldClockQuery.GetSingletonEntity();
             var buf = em.GetBuffer<TickInput>(globals);
             buf.Add(new TickInput
             {
@@ -335,30 +345,26 @@ namespace DGSvsHS.Server
 
         private void KickoffMatch()
         {
-            var em = _simWorld.EntityManager;
-            var q = em.CreateEntityQuery(ComponentType.ReadWrite<RoundState>());
-            if (q.CalculateEntityCount() == 0) return;
-            var rs = q.GetSingleton<RoundState>();
+            if (_roundStateQuery.CalculateEntityCount() == 0) return;
+            var rs = _roundStateQuery.GetSingleton<RoundState>();
             rs.Phase = RoundPhase.InterRound;
             rs.Round = 0;
             rs.InterRoundTimer = Constants.InterRoundDelaySec;
             rs.RoundTimer = 0f;
-            q.SetSingleton(rs);
+            _roundStateQuery.SetSingleton(rs);
         }
 
         // ---------- Heartbeat + telemetry ----------
 
         private void HeartbeatIfDue()
         {
-            var em = _simWorld.EntityManager;
-            var rsQ = em.CreateEntityQuery(ComponentType.ReadOnly<RoundState>());
-            if (rsQ.CalculateEntityCount() == 0) return;
-            var rs = rsQ.GetSingleton<RoundState>();
+            if (_roundStateQuery.CalculateEntityCount() == 0) return;
+            var rs = _roundStateQuery.GetSingleton<RoundState>();
             if (rs.Phase != _prevPhase || rs.Round != _prevRound)
             {
-                int alive = em.CreateEntityQuery(ComponentType.ReadOnly<EnemyTag>()).CalculateEntityCount();
+                int alive = _enemyTagQuery.CalculateEntityCount();
                 Debug.Log($"[Server] state: phase {_prevPhase}→{rs.Phase} round {_prevRound}→{rs.Round} " +
-                          $"tick={GetCurrentTick()} enemies={alive} players={em.CreateEntityQuery(ComponentType.ReadOnly<PlayerTag>()).CalculateEntityCount()}");
+                          $"tick={GetCurrentTick()} enemies={alive} players={_playerTagQuery.CalculateEntityCount()}");
                 _prevPhase = rs.Phase;
                 _prevRound = rs.Round;
             }
@@ -369,8 +375,8 @@ namespace DGSvsHS.Server
             if (wallElapsed < HeartbeatIntervalSec) return;
             _heartbeatLastWallTime = wallNow;
 
-            int aliveEnemies = em.CreateEntityQuery(ComponentType.ReadOnly<EnemyTag>()).CalculateEntityCount();
-            int activePlayers = em.CreateEntityQuery(ComponentType.ReadOnly<PlayerTag>()).CalculateEntityCount();
+            int aliveEnemies = _enemyTagQuery.CalculateEntityCount();
+            int activePlayers = _playerTagQuery.CalculateEntityCount();
 
             double avgMsPerTick = _heartbeatTickCount > 0 ? _heartbeatTickMsSum / _heartbeatTickCount : 0;
             float expectedTicks = wallElapsed * Constants.TicksPerSecond;

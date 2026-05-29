@@ -25,15 +25,19 @@ namespace DGSvsHS.Gameplay
             List<ushort> outRemoved,
             List<EnemySnap> outAdded,
             HashSet<ushort> includedIds,
-            List<ScoredEnemy> scratchScored)
+            List<ScoredEnemy> scratchScored,
+            HashSet<ushort> scratchCurrentIds,
+            Dictionary<ushort, int> scratchBaselineIndexById)
         {
             outChanged.Clear();
             outRemoved.Clear();
             outAdded.Clear();
             includedIds.Clear();
             scratchScored.Clear();
-            
-            var currentIds = new HashSet<ushort>();
+            scratchCurrentIds.Clear();
+            scratchBaselineIndexById.Clear();
+
+            var currentIds = scratchCurrentIds;
             for (int i = 0; i < current.Enemies.Count; i++) currentIds.Add(current.Enemies[i].Id);
             if (confirmedIds != null)
             {
@@ -52,8 +56,8 @@ namespace DGSvsHS.Gameplay
                     outRemoved.Add(bid);
                 }
             }
-            
-            var baselineIndexById = new Dictionary<ushort, int>(baseline.Enemies.Count);
+
+            var baselineIndexById = scratchBaselineIndexById;
             for (int i = 0; i < baseline.Enemies.Count; i++) baselineIndexById[baseline.Enemies[i].Id] = i;
 
             // ---- Removed entries

@@ -36,6 +36,8 @@ namespace DGSvsHS.Net.Ngo
         private readonly List<EnemySnap> _fullSelectedScratch = new List<EnemySnap>(2048);
         private readonly HashSet<ushort> _includedScratch = new HashSet<ushort>();
         private readonly List<SnapshotPriority.ScoredEnemy> _scoredScratch = new List<SnapshotPriority.ScoredEnemy>(2048);
+        private readonly HashSet<ushort> _currentIdsScratch = new HashSet<ushort>();
+        private readonly Dictionary<ushort, int> _baselineIndexByIdScratch = new Dictionary<ushort, int>(2048);
 
         private uint _serverTick;
 
@@ -158,7 +160,8 @@ namespace DGSvsHS.Net.Ngo
                     rstate.TicksSinceLastSent,
                     budgetForEnemies,
                     _changedScratch, _removedScratch, _addedScratch,
-                    _includedScratch, _scoredScratch);
+                    _includedScratch, _scoredScratch,
+                    _currentIdsScratch, _baselineIndexByIdScratch);
                 WireCodec.WriteDeltaSnapshotBody(
                     w,
                     current.Players,
@@ -317,8 +320,7 @@ namespace DGSvsHS.Net.Ngo
             int count;
             try { count = WireCodec.ReadInputBatch(r, _inputDecodeBuf); }
             catch (Exception) { return; } // malformed input — drop silently
-
-            // Process oldest → newest (the batch is newest-first by spec).
+            
             bool ackAdvanced = false;
             for (int i = count - 1; i >= 0; i--)
             {
@@ -334,8 +336,7 @@ namespace DGSvsHS.Net.Ngo
                 _inputQueues[pid].Enqueue(cmd);
                 InputReceived?.Invoke(pid, cmd);
             }
-
-            // Promote pending sends ≤ new ack tick into ConfirmedIds
+            
             if (ackAdvanced) _recipientState[pid].OnAckAdvanced();
         }
 

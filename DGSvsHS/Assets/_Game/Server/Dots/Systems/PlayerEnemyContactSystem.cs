@@ -12,18 +12,21 @@ namespace DGSvsHS.Server.Dots
     [UpdateBefore(typeof(RewindRecordSystem))]
     public partial struct PlayerEnemyContactSystem : ISystem
     {
+        private EntityQuery _enemyCountQuery;
+
         public void OnCreate(ref SystemState state)
         {
             state.RequireForUpdate<EnemyTag>();
             state.RequireForUpdate<PlayerTag>();
+            _enemyCountQuery = state.GetEntityQuery(ComponentType.ReadOnly<EnemyTag>());
         }
 
         public void OnUpdate(ref SystemState state)
         {
             var god = SystemAPI.GetSingleton<GodModeFlag>();
             if (god.On) return;
-            
-            int enemyCap = state.EntityManager.CreateEntityQuery(ComponentType.ReadOnly<EnemyTag>()).CalculateEntityCount();
+
+            int enemyCap = _enemyCountQuery.CalculateEntityCount();
             var enemyPos = new NativeList<float2>(enemyCap, Allocator.TempJob);
             foreach (var pos in SystemAPI.Query<RefRO<Position2D>>().WithAll<EnemyTag>())
             {
