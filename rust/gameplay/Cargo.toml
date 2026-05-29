@@ -1,0 +1,11 @@
+[package]
+name = "gameplay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = {version = "0.18.1", default-features = false, features = ["bevy_log"]}
+log = "0.4.30"
+libc = "0.2.186"
+mimalloc = "0.1.52"
+quiche = "0.29"
