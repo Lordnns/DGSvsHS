@@ -17,6 +17,10 @@ bytes = "1"
 thiserror = "2"
 tracing = "0.1"
 
+[features]
+default = []
+diag = []
+
 [profile.release]
 opt-level = 3
 lto = "fat"

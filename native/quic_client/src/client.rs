@@ -14,6 +14,44 @@ use tracing::{debug, error, warn};
 
 use crate::wire;
 
+#[cfg(feature = "diag")]
+mod diag {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
+    static FILE: OnceLock<Mutex<std::fs::File>> = OnceLock::new();
+
+    pub fn log(line: &str) {
+        let lock = FILE.get_or_init(|| {
+            let f = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("dgsvshs_client.log")
+                .expect("dgsvshs_client.log open failed");
+            Mutex::new(f)
+        });
+        if let Ok(mut f) = lock.lock() {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f32())
+                .unwrap_or(0.0);
+            let _ = writeln!(f, "[{:>14.3}] {}", ts, line);
+            let _ = f.flush();
+        }
+    }
+}
+
+#[cfg(feature = "diag")]
+macro_rules! diag_log {
+    ($($arg:tt)*) => { $crate::client::diag::log(&format!($($arg)*)) };
+}
+
+#[cfg(not(feature = "diag"))]
+macro_rules! diag_log {
+    ($($arg:tt)*) => { () };
+}
+
 #[repr(i32)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -147,12 +185,18 @@ async fn backend_loop(
     let mut conn: Option<Connection> = None;
     let mut reliable_send: Option<SendStream> = None;
 
+    diag_log!("backend_loop started");
+    #[cfg(feature = "diag")]
+    let (mut dgram_sent_ok, mut dgram_send_err): (u64, u64) = (0, 0);
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Command::Connect { host, port } => {
+                diag_log!("Connect({}, {})", host, port);
                 state.store(ConnectionState::Connecting.as_i32(), Ordering::Release);
                 match open_connection(&host, port).await {
                     Ok((c, send, recv)) => {
+                        diag_log!("Connect ok — max_datagram_size={:?}", c.max_datagram_size());
                         debug!("connected to {host}:{port}");
                         // Spawn reader tasks (stream + datagrams) that push InboundMessage into event_tx.
                         spawn_stream_reader(recv, event_tx.clone());
@@ -164,6 +208,7 @@ async fn backend_loop(
                         state.store(ConnectionState::Connected.as_i32(), Ordering::Release);
                     }
                     Err(e) => {
+                        diag_log!("Connect FAILED: {e}");
                         error!("connect failed: {e}");
                         state.store(ConnectionState::Disconnected.as_i32(), Ordering::Release);
                     }
@@ -172,26 +217,50 @@ async fn backend_loop(
 
             Command::SendReliable { msg_type, payload } => {
                 let Some(send) = reliable_send.as_mut() else {
+                    diag_log!("SendReliable(tag=0x{:02X}, {} B) DROPPED — no active stream", msg_type, payload.len());
                     warn!("send-reliable dropped: no active stream");
                     continue;
                 };
-                if let Err(e) = write_reliable(send, msg_type, &payload).await {
-                    error!("reliable send failed: {e}");
-                    state.store(ConnectionState::Disconnected.as_i32(), Ordering::Release);
-                    conn = None;
-                    reliable_send = None;
+                match write_reliable(send, msg_type, &payload).await {
+                    Ok(()) => {
+                        diag_log!("SendReliable(tag=0x{:02X}, {} B) ok", msg_type, payload.len());
+                    }
+                    Err(e) => {
+                        diag_log!("SendReliable(tag=0x{:02X}, {} B) FAILED: {e} — connection torn down", msg_type, payload.len());
+                        error!("reliable send failed: {e}");
+                        state.store(ConnectionState::Disconnected.as_i32(), Ordering::Release);
+                        conn = None;
+                        reliable_send = None;
+                    }
                 }
             }
 
             Command::SendUnreliable { msg_type, payload } => {
                 let Some(c) = conn.as_ref() else {
+                    diag_log!("SendUnreliable(tag=0x{:02X}, {} B) DROPPED — no active connection", msg_type, payload.len());
                     warn!("send-unreliable dropped: no active connection");
                     continue;
                 };
-                if let Err(e) = write_datagram(c, msg_type, &payload) {
-                    error!("datagram send failed: {e}");
-                    // Datagrams can fail for non-fatal reasons (overflow buffer, MTU). Don't tear
-                    // down the connection on a single drop.
+                match write_datagram(c, msg_type, &payload) {
+                    Ok(()) => {
+                        #[cfg(feature = "diag")]
+                        {
+                            dgram_sent_ok += 1;
+                            if dgram_sent_ok <= 5 || dgram_sent_ok % 200 == 0 {
+                                diag_log!("SendUnreliable(tag=0x{:02X}, {} B) ok — total ok={}, err={}, max_datagram_size={:?}",
+                                    msg_type, payload.len(), dgram_sent_ok, dgram_send_err, c.max_datagram_size());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "diag")]
+                        {
+                            dgram_send_err += 1;
+                            diag_log!("SendUnreliable(tag=0x{:02X}, {} B) FAILED: {:?} — total ok={}, err={}, max_datagram_size={:?}",
+                                msg_type, payload.len(), e, dgram_sent_ok, dgram_send_err, c.max_datagram_size());
+                        }
+                        error!("datagram send failed: {e}");
+                    }
                 }
             }
 
