@@ -1,6 +1,4 @@
-// Mirror of DGSvsHS/Assets/_Game/Net/WireCodec.cs — v3 protocol.
-// All byte ordering: little-endian. Float = IEEE 754 binary32.
-// Quantization rules: see DGSvsHS/Assets/_Game/Net/WireFormat.md §9.
+// Mirror of DGSvsHS/Assets/_Game/Net/WireCodec.cs — v4 protocol.
 
 #![allow(dead_code)]
 
@@ -10,7 +8,7 @@ use crate::game::{
     SnapshotKind,
 };
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 pub const MSG_CLIENT_HELLO: u8 = 0x01;
 pub const MSG_SERVER_WELCOME: u8 = 0x02;
@@ -24,7 +22,7 @@ pub const PLAYER_SNAP_FULL_BYTES: usize = 1 + 2 + 2 + 2 + 1 + 2; // 10
 pub const ENEMY_SNAP_FULL_BYTES: usize = 2 + 2 + 2; // 6
 pub const ENEMY_DELTA_ENTRY_BYTES: usize = 2 + 2 + 2; // 6
 pub const FIRE_EVENT_BYTES: usize = 4 + 1 + 2 + 2 + 2 + 2 + 1; // 14
-pub const INPUT_CMD_WIRE_BYTES: usize = 4 + 4 + 4 * 4 + 1; // 25
+pub const INPUT_CMD_WIRE_BYTES: usize = 4 + 4 + 2 + 2 + 2 + 1; // 15
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum DecodeError {
@@ -236,22 +234,28 @@ pub fn read_input_batch(r: &mut R, out: &mut Vec<InputCmd>) -> Result<usize, Dec
 fn write_one_input(w: &mut W, cmd: &InputCmd) {
     w.u32(cmd.tick);
     w.u32(cmd.last_acked_server_tick);
-    w.f32(cmd.move_x);
-    w.f32(cmd.move_y);
-    w.f32(cmd.aim_x);
-    w.f32(cmd.aim_y);
+    w.i16(quant_pos(cmd.move_x));
+    w.i16(quant_pos(cmd.move_y));
+    w.i16(quant_angle(cmd.aim_x, cmd.aim_y));
     w.u8(cmd.flags.0);
 }
 
 fn read_one_input(r: &mut R) -> Result<InputCmd, DecodeError> {
+    let tick = r.u32()?;
+    let ack = r.u32()?;
+    let mx_q = r.i16()?;
+    let my_q = r.i16()?;
+    let aim_q = r.i16()?;
+    let flags = r.u8()?;
+    let (aim_x, aim_y) = dequant_angle(aim_q);
     Ok(InputCmd {
-        tick: r.u32()?,
-        last_acked_server_tick: r.u32()?,
-        move_x: r.f32()?,
-        move_y: r.f32()?,
-        aim_x: r.f32()?,
-        aim_y: r.f32()?,
-        flags: InputFlags(r.u8()?),
+        tick,
+        last_acked_server_tick: ack,
+        move_x: dequant_pos(mx_q),
+        move_y: dequant_pos(my_q),
+        aim_x,
+        aim_y,
+        flags: InputFlags(flags),
     })
 }
 

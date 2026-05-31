@@ -17,8 +17,23 @@ namespace DGSvsHS.Client
         [Header("Connection")]
         [Tooltip("Server host. Use 127.0.0.1 when running server and client on the same machine.")]
         public string Host = "127.0.0.1";
-        [Tooltip("Server port.")]
+        // Default port is picked per build flavor (see BuildModeSwitcher). Each server flavor
+        // listens on its own UDP port so side-by-side trials don't collide.
+        //   WITH_DGS         → 7777 (Unity DOTS DedicatedServerMain)
+        //   HS_TARGET_ARCH   → 7778 (csharp_arch_server)
+        //   HS_TARGET_BEVY   → 4433 (rust/gameplay Bevy server, hardcoded in plugin.rs)
+        //   (BareBone uses 7779 but never has a client connecting to it.)
+        // Still settable in the Inspector — this is just the right out-of-box default.
+#if HS_TARGET_BEVY
+        [Tooltip("Server port. Default 4433 (Rust/Bevy server).")]
+        public ushort Port = 4433;
+#elif HS_TARGET_ARCH
+        [Tooltip("Server port. Default 7778 (C#/Arch server).")]
+        public ushort Port = 7778;
+#else
+        [Tooltip("Server port. Default 7777 (Unity DOTS server).")]
         public ushort Port = 7777;
+#endif
         [Tooltip("If true, attempts to connect on Start. Disable when a harness (TrialRunner) drives connection lifecycle.")]
         public bool AutoConnect = true;
 

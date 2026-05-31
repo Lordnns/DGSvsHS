@@ -14,7 +14,7 @@ use super::codec::{
 use super::events::{ClientConnected, ClientDisconnected, ClientId, MsgKind, NetMsgIn, NetMsgOut};
 use crate::game::constants::MAX_PLAYERS;
 
-const ALPN: &[u8] = b"dgs/v1";
+const ALPN: &[u8] = b"dgsvshs/2";
 const LISTEN_ADDR: &str = "0.0.0.0:4433";
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const RECV_BUF: usize = 65535;

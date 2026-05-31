@@ -149,7 +149,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: DGSvsHS.Client::DGSvsHS.Client.ClientMain
   Host: 127.0.0.1
-  Port: 7777
+  Port: 4433
   AutoConnect: 1
   UnitSprite: {fileID: 0}
   LocalPlayerColor: {r: 0.3, g: 0.9, b: 1, a: 1}

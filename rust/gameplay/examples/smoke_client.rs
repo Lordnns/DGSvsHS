@@ -17,7 +17,7 @@ use gameplay::network::{
 };
 
 const SERVER_ADDR: &str = "127.0.0.1:4433";
-const ALPN: &[u8] = b"dgs/v1";
+const ALPN: &[u8] = b"dgsvshs/2";
 const MAX_DATAGRAM_SIZE: usize = 1350;
 const RECV_BUF: usize = 65535;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);

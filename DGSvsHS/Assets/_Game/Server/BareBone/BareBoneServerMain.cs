@@ -32,7 +32,12 @@ namespace DGSvsHS.Server.BareBone
     public sealed class BareBoneServerMain : MonoBehaviour
     {
         [Header("Network")]
-        public ushort Port = 7777;
+        // 7779 keeps each server flavor on its own UDP port for side-by-side trials:
+        //   Unity DOTS (DGS)  → 7777
+        //   C# Arch           → 7778
+        //   Bevy/Avian        → 4433
+        //   BareBone (this)   → 7779
+        public ushort Port = 7779;
 
         [Header("Slots")]
         [Tooltip("How many client slots the bare-bone listener accepts. Above this, new connections are refused.")]

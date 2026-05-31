@@ -8,7 +8,6 @@ namespace DGSvsHS.Server
         public float HeartbeatIntervalSec = 0.5f;
 
         [Header("DGS Settings")]
-        public ushort Port = 7777;
         public ulong Seed = 0xC0FFEE_F00DUL;
         public bool AutoStartMatch = true;
         public bool GodMode = false;
@@ -18,7 +17,6 @@ namespace DGSvsHS.Server
 #if WITH_DGS
             // Dynamically add the DGS script and pass the inspector variables down
             var dgs = gameObject.AddComponent<DedicatedServerMain>();
-            dgs.Port = Port;
             dgs.Seed = Seed;
             dgs.AutoStartMatch = AutoStartMatch;
             dgs.GodMode = GodMode;

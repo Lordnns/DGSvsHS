@@ -1,4 +1,4 @@
-# DGSvsHS Wire Format (v3)
+# DGSvsHS Wire Format (v4)
 
 Canonical engine-neutral specification of the DGSvsHS server↔client protocol. All three server implementations (Unity DOTS, Rust/Bevy/Avian, C#/Arch/Friflo/BepuPhysics) MUST produce bit-identical bytes for identical input. The shared Unity client decodes from this spec alone — no engine-specific extensions on the wire.
 
@@ -31,20 +31,22 @@ The transport choice (UDP, QUIC, etc.) is per-implementation; the bytes inside `
 
 ### Transport-level requirements (QUIC builds only)
 
-Implementations that use QUIC as the underlying transport (Bevy and Arch servers; the Unity client when in HS mode) MUST advertise the **ALPN identifier `dgsvshs/1`** on both sides of the connection. This is enforced by `System.Net.Quic` and recommended by every other QUIC stack — without a matching ALPN string the TLS 1.3 handshake closes with `no_application_protocol` (RFC 9000 §8) before any application data flows.
+Implementations that use QUIC as the underlying transport (Bevy and Arch servers; the Unity client when in HS mode) MUST advertise the **ALPN identifier `dgsvshs/2`** on both sides of the connection. This is enforced by `System.Net.Quic` and recommended by every other QUIC stack — without a matching ALPN string the TLS 1.3 handshake closes with `no_application_protocol` (RFC 9000 §8) before any application data flows.
 
-- **Rust client / Bevy server**: in the `rustls::ClientConfig` / `rustls::ServerConfig`, set
+- **Rust client / Bevy server**: in the `rustls::ClientConfig` / `quiche::Config`, set
   ```rust
-  config.alpn_protocols = vec![b"dgsvshs/1".to_vec()];
+  config.alpn_protocols = vec![b"dgsvshs/2".to_vec()];
+  // quiche:
+  cfg.set_application_protos(&[b"dgsvshs/2"]).unwrap();
   ```
-- **C# Arch server**: in `QuicListenerOptions` and `QuicServerConnectionOptions`,
+- **C# Arch server**: in `QuicServerConfiguration`,
   ```csharp
-  ApplicationProtocols = new() { new SslApplicationProtocol("dgsvshs/1") };
+  new QuicServerConfiguration(registration, (SizedUtf8String)"dgsvshs/2");
   ```
 
 Exact case-sensitive string match; no leading/trailing whitespace. The NGO/UDP transport used by the Unity DOTS server is unaffected — ALPN is a TLS-layer concept and NGO doesn't speak TLS.
 
-If the protocol-version field in `ServerWelcome` is bumped past v3, the ALPN string SHOULD be bumped in lockstep (`dgsvshs/2`, etc.) so old clients/servers fail at the handshake layer rather than at the application-version-check layer — gives a cleaner error and avoids accidental cross-version connections.
+The ALPN tag is bumped in lockstep with `ServerWelcome.protocol_version` so old clients/servers fail at the handshake layer rather than at the application-version-check layer — cleaner error, no accidental cross-version connections. v3 → `dgsvshs/1`, v4 → `dgsvshs/2`.
 
 ---
 
@@ -52,7 +54,7 @@ If the protocol-version field in `ServerWelcome` is bumped past v3, the ALPN str
 
 ### `ClientHello` (0x01)
 ```
-u32 protocol_version       // currently 3
+u32 protocol_version       // currently 4
 u8  client_capabilities    // bitfield, reserved, send 0
 ```
 
@@ -83,16 +85,31 @@ u8  redundancy_count        // 1..4
 InputCmd cmds[redundancy_count]   // newest first
 ```
 
-`InputCmd` (**25 bytes**):
+`InputCmd` (**15 bytes**, v4):
 ```
 u32 tick
 u32 last_acked_server_tick   // highest server snapshot tick the client has fully reconstructed
-f32 move_x                   // movement input, clamped server-side to magnitude ≤ 1
-f32 move_y
-f32 aim_x                    // unit-length world-space aim vector
-f32 aim_y
+i16 move_x_q                 // movement input × PositionScale (1000), clamped server-side to magnitude ≤ 1
+i16 move_y_q
+i16 aim_angle_q              // atan2(aim_y, aim_x) × AngleScale (10430 ≈ 32768/π); same quantization as PlayerSnap.aim_angle
 u8  flags                    // bit 0 = Fire; other bits reserved, must be 0
 ```
+
+Quantization on the wire saves 10 bytes per `InputCmd` (40% reduction) and keeps every numeric field consistent with the snapshot side. Encode:
+```
+i16 move_x_q     = clamp_i16(round(move_x * 1000))
+i16 move_y_q     = clamp_i16(round(move_y * 1000))
+i16 aim_angle_q  = clamp_i16(round(atan2(aim_y, aim_x) * 10430))   // 0 if |aim| < ε
+```
+Decode (server side, after read):
+```
+move_x  = move_x_q / 1000.0
+move_y  = move_y_q / 1000.0
+angle   = aim_angle_q / 10430.0
+aim_x   = cos(angle)
+aim_y   = sin(angle)
+```
+Precision is well within what the sim needs: movement quantizes at 0.001 (1 mm-equivalent on a unit input), aim at ~0.00006 rad (~0.0035°). Worst-case loss at full diagonal input (sqrt(2)) is sub-mm in resulting player displacement per tick.
 
 Server dedup: inputs whose `tick` is ≤ the highest tick already processed for that player are discarded as processed-input commands. However, the **highest** `last_acked_server_tick` seen across the batch — including from dedup-dropped entries — is always promoted into the recipient state. The ack is monotonic and informative even from already-processed inputs.
 

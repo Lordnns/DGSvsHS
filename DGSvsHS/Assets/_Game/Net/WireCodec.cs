@@ -8,7 +8,7 @@ namespace DGSvsHS.Net
 {
     public static class WireCodec
     {
-        public const uint ProtocolVersion = 3;
+        public const uint ProtocolVersion = 4;
 
         public const byte MsgClientHello   = 0x01;
         public const byte MsgServerWelcome = 0x02;
@@ -55,8 +55,8 @@ namespace DGSvsHS.Net
 
         // ---------- Input ----------
 
-        ///InputCmd wire size: 4 (tick) + 4 (ack) + 16 (move+aim f32) + 1 (flags) = 25 bytes.
-        public const int InputCmdWireBytes = 25;
+        ///InputCmd wire size (v4): 4 (tick) + 4 (ack) + 2 (move_x i16) + 2 (move_y i16) + 2 (aim_angle i16) + 1 (flags) = 15 bytes.
+        public const int InputCmdWireBytes = 15;
 
         public static void WriteInputBatch(BinaryWriter w, InputCmd[] cmds, int count)
         {
@@ -78,22 +78,27 @@ namespace DGSvsHS.Net
         {
             w.Write(cmd.Tick);
             w.Write(cmd.LastAckedServerTick);
-            w.Write(cmd.Move.x);
-            w.Write(cmd.Move.y);
-            w.Write(cmd.Aim.x);
-            w.Write(cmd.Aim.y);
+            w.Write(QuantPosition(cmd.Move.x));   // i16 mm
+            w.Write(QuantPosition(cmd.Move.y));
+            w.Write(QuantAngle(cmd.Aim));         // i16 radians × AngleScale (same encoding as PlayerSnap.aim_angle)
             w.Write((byte)cmd.Flags);
         }
 
         private static InputCmd ReadOneInput(BinaryReader r)
         {
+            uint tick = r.ReadUInt32();
+            uint ack = r.ReadUInt32();
+            short mxQ = r.ReadInt16();
+            short myQ = r.ReadInt16();
+            short aimQ = r.ReadInt16();
+            byte flags = r.ReadByte();
             return new InputCmd
             {
-                Tick = r.ReadUInt32(),
-                LastAckedServerTick = r.ReadUInt32(),
-                Move = new Vector2(r.ReadSingle(), r.ReadSingle()),
-                Aim = new Vector2(r.ReadSingle(), r.ReadSingle()),
-                Flags = (InputFlags)r.ReadByte(),
+                Tick = tick,
+                LastAckedServerTick = ack,
+                Move = new Vector2(DequantPosition(mxQ), DequantPosition(myQ)),
+                Aim = DequantAngle(aimQ),
+                Flags = (InputFlags)flags,
             };
         }
 

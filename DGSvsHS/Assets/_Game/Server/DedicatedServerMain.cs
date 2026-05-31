@@ -133,6 +133,9 @@ namespace DGSvsHS.Server
 
         private void Start()
         {
+            SetGodMode(GodMode);
+            SimBootstrap.CreateOrResetGlobals(_simWorld.EntityManager, Seed);
+            
             _net.Start(Port);
             TransitionTo(ServerLifecycle.Idle, "Start() complete");
             Debug.Log($"[DedicatedServerMain] Listening on port {Port}, seed {Seed:X}, godMode={GodMode}");
