@@ -680,8 +680,8 @@ PlayerSettings:
   webWasm2023: 0
   webEnableSubmoduleStrippingCompatibility: 0
   scriptingDefineSymbols:
-    Server: WITH_HS;HS_TARGET_BEVY
-    Standalone: WITH_HS;HS_TARGET_BEVY
+    Server: WITH_HS;HS_TARGET_ARCH
+    Standalone: WITH_HS;HS_TARGET_ARCH
   additionalCompilerArguments: {}
   platformArchitecture: {}
   scriptingBackend:

@@ -1,0 +1,114 @@
+using DGSvsHS.Gameplay;
+
+namespace DGSvsHS.ArchServer.Server;
+
+public sealed class RecipientSnapshotState
+{
+    public uint LastAckedServerTick;
+
+    public readonly HashSet<ushort> ConfirmedIds = new();
+    public readonly Dictionary<ushort, ushort> TicksSinceLastSent = new();
+
+    private struct PendingEntry
+    {
+        public uint Tick;
+        public bool IsFull;
+        public HashSet<ushort> Included;
+        public HashSet<ushort> Removed;
+    }
+
+    private readonly List<PendingEntry> _pending = new();
+    private readonly Stack<HashSet<ushort>> _setPool = new();
+
+    private readonly List<ushort> _keysScratch = new(4096);
+
+    private const int MaxPending = Constants.MaxDeltaDepth * 2;
+
+    private HashSet<ushort> RentSet() => _setPool.Count > 0 ? _setPool.Pop() : new HashSet<ushort>();
+    private void ReturnSet(HashSet<ushort> s) { s.Clear(); _setPool.Push(s); }
+
+    public void OnSnapshotSent(uint tick, bool isFull, HashSet<ushort> included, IReadOnlyList<ushort> removed)
+    {
+        while (_pending.Count >= MaxPending)
+        {
+            var dropped = _pending[0];
+            ReturnSet(dropped.Included);
+            ReturnSet(dropped.Removed);
+            _pending.RemoveAt(0);
+        }
+
+        var incCopy = RentSet();
+        foreach (var id in included) incCopy.Add(id);
+        var remCopy = RentSet();
+        for (int i = 0; i < removed.Count; i++) remCopy.Add(removed[i]);
+        _pending.Add(new PendingEntry { Tick = tick, IsFull = isFull, Included = incCopy, Removed = remCopy });
+
+        _keysScratch.Clear();
+        foreach (var k in TicksSinceLastSent.Keys) _keysScratch.Add(k);
+        for (int i = 0; i < _keysScratch.Count; i++)
+        {
+            ushort id = _keysScratch[i];
+            if (included.Contains(id)) TicksSinceLastSent[id] = 0;
+            else
+            {
+                ushort cur = TicksSinceLastSent[id];
+                TicksSinceLastSent[id] = cur < ushort.MaxValue ? (ushort)(cur + 1) : ushort.MaxValue;
+            }
+        }
+    }
+
+    public void OnAckAdvanced()
+    {
+        int writeIdx = 0;
+        for (int i = 0; i < _pending.Count; i++)
+        {
+            var p = _pending[i];
+            if (p.Tick > LastAckedServerTick)
+            {
+                _pending[writeIdx++] = p;
+                continue;
+            }
+
+            if (p.IsFull)
+            {
+                ConfirmedIds.Clear();
+                TicksSinceLastSent.Clear();
+                foreach (var id in p.Included)
+                {
+                    ConfirmedIds.Add(id);
+                    TicksSinceLastSent[id] = 0;
+                }
+            }
+            else
+            {
+                foreach (var id in p.Included)
+                {
+                    ConfirmedIds.Add(id);
+                    if (!TicksSinceLastSent.ContainsKey(id)) TicksSinceLastSent[id] = 0;
+                }
+                foreach (var id in p.Removed)
+                {
+                    ConfirmedIds.Remove(id);
+                    TicksSinceLastSent.Remove(id);
+                }
+            }
+
+            ReturnSet(p.Included);
+            ReturnSet(p.Removed);
+        }
+        if (writeIdx < _pending.Count) _pending.RemoveRange(writeIdx, _pending.Count - writeIdx);
+    }
+
+    public void Clear()
+    {
+        LastAckedServerTick = 0;
+        ConfirmedIds.Clear();
+        TicksSinceLastSent.Clear();
+        for (int i = 0; i < _pending.Count; i++)
+        {
+            ReturnSet(_pending[i].Included);
+            ReturnSet(_pending[i].Removed);
+        }
+        _pending.Clear();
+    }
+}

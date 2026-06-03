@@ -376,4 +376,75 @@ All paths are relative to the **Unity project root** (`B:/DGSvsHS/DGSvsHS/`).
 
 ---
 
-End of `CLAUDE.md`. When in doubt, re-read §2 (gameplay model) and §5 (v2 plan). Most "should I do X?" questions are answered there.
+## 11. Session log — 2026-05 to 2026-06 (v4 wire format + Arch full parity)
+
+This section supersedes §4–§6 for "where we are right now." The earlier §5 v2 wire-format plan is **done and extended to v4** (smaller InputCmd than v2 proposed). All three legs are wire-compatible.
+
+### 11.1 Completed in this session
+
+- **Arch server (`csharp_arch_server/`) brought to behavioral parity with DGS.** Full sim port (lifecycle SM + round director + lag-comp rewind + 9 systems), then a QUIC server on **StirlingLabs.MsQuic 23.7.1**, then per-recipient snapshot machinery matching `NgoNetworkServer`.
+- **QUIC stack choice settled.** Bevy uses `quiche` (BoringSSL). Arch uses StirlingLabs.MsQuic (msquic underneath, all-C# from project POV). Unity HS client uses `native/quic_client/` (quinn + rustls). VALERE91's "fairness" concern about native QUIC libs is settled: all three legs use native QUIC underneath, only gameplay code differs.
+- **Wire format v4.** `InputCmd` quantized to **15 bytes** (was 25): `i16×1000` Move axes + `i16 angle×AngleScale` Aim (mirrors snapshot encoding). 40% bandwidth reduction on the input lane. `ProtocolVersion = 4`, ALPN bumped to **`dgsvshs/2`** everywhere (incidentally fixed Bevy server which was on a non-matching `dgs/v1`).
+- **Snapshot delta + priority machinery on Arch.** `WorldStateHistory` ring (64 ticks), `RecipientSnapshotState` per slot (ConfirmedIds, TicksSinceLastSent, PendingSends with `MaxPending = MaxDeltaDepth*2` leak cap and reusable `_keysScratch`), `SnapshotPriority.SelectForDelta` (3 lanes: removed + spawn + animation), per-recipient delta-vs-full decision in `BroadcastSnapshot`. Bandwidth at 3000 enemies now ~100-300 B/tick instead of 18 KB (matches DGS).
+- **Memory-leak fixes on the Unity DGS server (already merged in §7-style additions):**
+  - `RecipientSnapshotState._pending` capped + reusable `_keysScratch`
+  - `SnapshotPriority.SelectForDelta` `currentIdsScratch` + `baselineIndexByIdScratch` are caller-owned (was `new` every send → ~20 MB/sec of GC pressure)
+  - `DedicatedServerMain` cached all `EntityManager.CreateEntityQuery` calls in fields (per-frame query allocation was leaking ~7 MB/sec with 0 clients connected at 500-1000 Hz idle frame rate)
+  - `PlayerEnemyContactSystem` cached `_enemyCountQuery`
+- **Per-server port layout** (one server per port so side-by-side trials don't collide):
+  - Unity DGS → **7777**
+  - C# Arch → **7778** (was 7777)
+  - Rust Bevy → **4433**
+  - BareBone → **7779** (was 7777)
+- **Build mode switcher** now has `HS/Arch` and `HS/Bevy` submenus (DGS, BareBone unchanged). Selecting a mode also rewrites `ClientMain.Port` in the Client.unity scene file via SerializedObject so the Inspector matches the freshly selected target.
+- **Compile-time flavors via publish scripts.** `scripts/publish_windows.ps1 -GodMode` and `scripts/publish_linux.sh --god-mode` pass `-p:GodModeDefault=true` → csproj appends `GODMODE_DEFAULT` define → `Program.cs` flips `Config.GodMode` to true by default. Output lands in `publish-godmode/` so normal and godmode binaries coexist. Pattern extensible — copy 3 layers for any new flavor.
+- **Rust client diagnostic gated** behind `diag` Cargo feature (`cargo build --release --features diag` writes `dgsvshs_client.log` next to the host). Off by default — no per-send `format!` allocation overhead.
+
+### 11.2 Current state per leg
+
+| Leg | Lang | Server status | Wire | Notes |
+|---|---|---|---|---|
+| **DGS** | C# / Unity DOTS | Production-ready, all bug fixes merged | v4, NGO transport | Port 7777. Battle-tested wire codec (shared with all Unity-side builds). |
+| **Arch** | C# / Arch / BepuPhysics | Production-ready, parity with DGS | v4, QUIC via StirlingLabs.MsQuic | Port 7778. Bepu kept as csproj dep but unused (gameplay hand-rolled, matches DOTS). All delta/ack/priority machinery in place. |
+| **Bevy** | Rust / Bevy / Avian | Unverified — codec has v4 + tests pass, but plugin's snapshot send path **may not yet use** `SelectForDelta` (the function exists in codec.rs but I didn't audit plugin.rs to confirm). | v4, QUIC via quiche | Port 4433. ALPN was wrong (`dgs/v1` → `dgsvshs/2`). Build requires WSL (`boring-sys` needs NASM+CMake; doesn't compile on Windows). |
+
+### 11.3 Next steps (prioritized)
+
+1. **Audit `rust/gameplay/src/network/plugin.rs` snapshot send path.** Verify it composes per-recipient deltas with priority selection (the codec functions are there; the plugin orchestration may still be sending naïve fulls). If not, port the orchestration logic from `csharp_arch_server/Net/QuicServer.cs::BroadcastSnapshot`.
+2. **Cross-stack QUIC interop smoke test.** quinn (client) ↔ quiche (Bevy) and quinn (client) ↔ msquic (Arch) both follow RFC 9000 + 9221 but minor differences (datagram size advertisement, stream FIN timing) occasionally surface. Have not seen the user run the Bevy server against the Unity HS client end-to-end yet.
+3. **Microvm build for Arch server.** Bevy has `rust/build_microvm_aarch64.sh`. Arch needs an equivalent — likely a Dockerfile + Firecracker init or a single-file self-contained .NET 10 binary + minimal Alpine rootfs. Pending design choice from user (deferred during the v4 work).
+4. **Per-player RTT plumbing into `ctx.PlayerRttMs[]` on Arch.** Currently hardcoded 60 ms default → RewindResolve's view-time is uniform across all shooters. StirlingLabs.MsQuic doesn't expose RTT directly; need to call msquic's `QUIC_PARAM_CONN_STATISTICS` via the raw bindings each tick. Low impact unless measuring lag-comp effects in trials.
+5. **NDJSON harness output format.** TrialRunner produces NDJSON on the client side; servers need to emit equivalent per-tick stats (ms/tick, RAM, RSS, enemy count) for power-correlation. The heartbeat lines are already in the apples-to-apples format (`SERVER STATS | RAM (RSS): X.XX MB | RAM (VM) : Y.YY MB | Uptime: Z.Zs | tick=N bodies=N state=...`) — needs an `--output trial.ndjson` flag too.
+6. **Power measurement integration.** Out of code scope; wattmeter feeds a separate log that gets joined to server NDJSON by timestamp post-hoc.
+
+### 11.4 Key files (jump-points for the next session)
+
+- `csharp_arch_server/Program.cs` — main loop, lifecycle SM, history.Record + BroadcastSnapshot wiring
+- `csharp_arch_server/Net/QuicServer.cs` — StirlingLabs.MsQuic wrap, BroadcastSnapshot (per-recipient delta-or-full), OnDatagramReceived (input parse + ack advance)
+- `csharp_arch_server/Net/WireCodec.cs` — v4 wire codec, header + Full body + Delta body
+- `csharp_arch_server/Net/SnapshotPriority.cs` — SelectForFull + SelectForDelta
+- `csharp_arch_server/Server/RecipientSnapshotState.cs` — per-slot ack machinery with leak caps
+- `csharp_arch_server/Server/WorldStateHistory.cs` — ring buffer
+- `csharp_arch_server/scripts/publish_windows.ps1` / `publish_linux.sh` — supports `-GodMode` / `--god-mode`
+- `DGSvsHS/Assets/_Game/Net/WireCodec.cs` — Unity-side shared codec (single source for DGS/HS client + DGS server)
+- `DGSvsHS/Assets/_Game/Editor/BuildModeSwitcher.cs` — DGS / HS/Arch / HS/Bevy / BareBone menu + scene Port rewriter
+- `DGSvsHS/Assets/_Game/Client/ClientMain.cs` — port default per `HS_TARGET_*` define
+- `rust/gameplay/src/network/codec.rs` — Bevy wire codec, v4
+- `rust/gameplay/src/network/plugin.rs` — Bevy QUIC plugin (snapshot send path **needs audit**)
+- `native/quic_client/src/client.rs` — Rust QUIC client used by Unity HS via FFI; diag log gated behind `diag` feature
+
+### 11.5 Bugs already fixed (don't re-introduce)
+
+In addition to the §7 list, these were found this session:
+
+- **Stream framing off-by-one.** Arch server was writing `length = 1 + payload.Length` (counted the msg_type byte) but the Rust client and the protocol spec define `length = payload.Length`. ServerWelcome would block the quinn reader forever waiting for byte 14 of a 13-byte payload. Fixed in `Net/WireCodec.cs::FrameStreamMessage` and the OnIncomingStream reader.
+- **`LastProcessedInputTick = 0` hardcoded.** Without per-recipient ack tracking, the client never discarded pending inputs from its replay buffer; predicted player drifted ahead, snapped back on every snapshot, looked like "trying to go to the center." Fixed: `QuicServer` tracks `_highestInputTick[pid]`, stamped into each per-recipient snapshot.
+- **`ReceiveDatagramsAsync = true` ThreadPool dispatch path.** StirlingLabs's async-dispatch route added latency + a potential drop point. Switched to sync dispatch on the msquic worker thread (`ReceiveDatagramsAsync = false`).
+- **StirlingLabs.MsQuic 23.7.1 static initializer reads `Assembly.Location`.** Single-file publish defaults extract only native libs; managed assemblies stay in the bundle and `Assembly.Location` is empty → `new Uri("")` throws. Fixed by passing `-p:IncludeAllContentForSelfExtract=true` in publish scripts.
+- **Bundled `libmsquic-openssl.so` is OpenSSL-1.1.** Ubuntu 24.04 has OpenSSL 3 only. Fixed via post-build symlink to apt-installed `libmsquic.so.2` (in csproj `DeployMsQuicNative` target).
+- **MSBuild Copy of `runtimes/win-x64/native/msquic-openssl.dll` only valid for `dotnet build`, not `dotnet publish -r win-x64`.** Publish puts the .dll directly at `$(OutputPath)`. Fixed with `Exists()` condition on the Copy task.
+- **XML comments cannot contain `--`.** csproj comment with `--god-mode` broke MSBuild project load. Use plain prose without double-hyphens inside `<!-- -->`.
+
+---
+
+End of `CLAUDE.md`. When in doubt, re-read §2 (gameplay model) and §11 (current state + next steps). Most "should I do X?" questions are answered there.
