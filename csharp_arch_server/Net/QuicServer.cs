@@ -104,6 +104,13 @@ public sealed class QuicServer : IDisposable
                 rstate = _recipientState[pid] = new RecipientSnapshotState();
             }
 
+            int pendingAck = Interlocked.Exchange(ref rstate.PendingAckedTick, 0);
+            if (pendingAck > 0 && (uint)pendingAck > rstate.LastAckedServerTick)
+            {
+                rstate.LastAckedServerTick = (uint)pendingAck;
+                rstate.OnAckAdvanced();
+            }
+
             Snapshot baseline = null!;
             bool useDelta = false;
             uint baselineTick = 0;
@@ -173,6 +180,8 @@ public sealed class QuicServer : IDisposable
             bool sendOk = false;
             try
             {
+                if ((snap.Tick & 63) == 0)
+                      Log($"slot {pid}: DatagramsAllowed={slot.Connection.DatagramsAllowed} MaxSendLength={slot.Connection.MaxSendLength}");
                 if (!slot.Connection.DatagramsAllowed) continue;
                 if (bytes.Length > slot.Connection.MaxSendLength)
                 {
@@ -334,10 +343,13 @@ public sealed class QuicServer : IDisposable
                    && Interlocked.CompareExchange(ref _highestInputTick[slot.PlayerId], batchMaxClientTick, existing) != existing);
 
             var rstate = _recipientState[slot.PlayerId];
-            if (rstate != null && batchMaxServerAck > rstate.LastAckedServerTick)
+            if (rstate != null && batchMaxServerAck > 0)
             {
-                rstate.LastAckedServerTick = batchMaxServerAck;
-                rstate.OnAckAdvanced();
+                int desired = (int)batchMaxServerAck;
+                int cur;
+                do { cur = Volatile.Read(ref rstate.PendingAckedTick); }
+                while (desired > cur
+                       && Interlocked.CompareExchange(ref rstate.PendingAckedTick, desired, cur) != cur);
             }
         }
         catch (Exception ex)

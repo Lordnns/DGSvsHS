@@ -9,6 +9,8 @@ public sealed class RecipientSnapshotState
     public readonly HashSet<ushort> ConfirmedIds = new();
     public readonly Dictionary<ushort, ushort> TicksSinceLastSent = new();
 
+    public int PendingAckedTick;
+
     private struct PendingEntry
     {
         public uint Tick;

@@ -374,6 +374,42 @@ All paths are relative to the **Unity project root** (`B:/DGSvsHS/DGSvsHS/`).
 2. Run with CLI: `DGSvsHS.exe --server 127.0.0.1 --port 7777 --bot-id 0 --seed 1 --duration 300 --output trial.ndjson`.
 3. Repeat with `--bot-id 1, 2, 3` for 4-bot trials. Each bot has a deterministic orbit derived from `seed ^ botId`.
 
+### §10.1 MicroVM build + Proxmox deployment
+
+The three `build_microvm_aarch64.sh` scripts (Bevy, Arch, Unity DGS) each output two files into a leg-local `.microvm_aarch64/` working dir:
+
+- `vmlinuz-virt` — Alpine `linux-virt` aarch64 kernel (~10 MB)
+- `initramfs.cpio.gz` — rootfs + `/init` (Rust = ~5 MB; Arch = ~80 MB; Unity = ~200 MB+ depending on Data/)
+
+These are NOT a turnkey Proxmox VM template (no qcow2, no GRUB, no `/sbin/init`). The kernel boots the initramfs directly; there is no disk image.
+
+**Standalone QEMU (what the script does by default).** The script ends by booting via `qemu-system-aarch64 -nographic -append "console=ttyAMA0 …"`. All `printf`/log output from the server binary lands in the terminal where the script was launched (`logFile /dev/stdout` for Unity; default stdout for the others). Ctrl-A then X to kill QEMU.
+
+**Architecture caveat.** Scripts produce aarch64 microvms. Proxmox VE is x86_64-only in practice. Running an aarch64 microvm on pve01 falls back to QEMU TCG (software emulation, 10–100× slowdown) — invalidates power trials. Two options:
+- Run on an aarch64 host (Hetzner Ampere box, Apple Silicon Mac with `accel=hvf`)
+- Port the scripts to x86_64 (see §11.3 #3 for the swap list)
+
+**Proxmox VE direct-kernel-boot deployment (works for aarch64 only if the Proxmox host is aarch64).** Proxmox doesn't expose direct-kernel-boot in the web UI but its underlying QEMU does. Procedure on the Proxmox host:
+
+1. `scp .microvm_aarch64/vmlinuz-virt .microvm_aarch64/initramfs.cpio.gz root@pve01:/var/lib/vz/template/microvm/`
+2. Create a placeholder VM in the UI (any guest OS; no disk needed — but the UI requires one to save, so attach a 1 GB scratch disk you'll never use).
+3. Edit `/etc/pve/qemu-server/<VMID>.conf` and append:
+   ```
+   args: -kernel /var/lib/vz/template/microvm/vmlinuz-virt -initrd /var/lib/vz/template/microvm/initramfs.cpio.gz -append "console=ttyS0 panic=1 cgroup_disable=memory,pids"
+   serial0: socket
+   ```
+   `console=ttyS0` (not `ttyAMA0`) because Proxmox's q35 machine uses an ISA serial port.
+4. In the UI, set **Hardware → Display → Serial terminal (serial0)**. This makes the web UI "Console" tab attach to the serial socket.
+5. Forward UDP 7777 (DGS) / 7778 (Arch) / 4433 (Bevy) on the Proxmox firewall to the VM's NIC.
+6. Start the VM.
+
+**Viewing logs in Proxmox:**
+- Web UI: **VM → Console** tab (with `serial0` set as display). Shows the boot sequence + every server log line.
+- CLI: `ssh root@pve01` then `qm terminal <VMID>` — same serial console in your SSH session. Ctrl-O to exit.
+- Persistent: `qm config <VMID>` to check serial is wired; logs are not retained anywhere on the host by default (initramfs `/tmp` is tmpfs). To persist, redirect stdout inside `/init` to a virtio-9p shared host folder or add a virtio-blk disk and mount it.
+
+**Bypass-Proxmox path (simplest for debugging).** SSH into the Proxmox host directly and run the same `qemu-system-aarch64 …` line the script uses. Logs come back through the SSH terminal. No VM gets created in the Proxmox UI. Useful when you just want to verify the microvm boots cleanly before automating the deployment.
+
 ---
 
 ## 11. Session log — 2026-05 to 2026-06 (v4 wire format + Arch full parity)
@@ -399,6 +435,7 @@ This section supersedes §4–§6 for "where we are right now." The earlier §5 
 - **Build mode switcher** now has `HS/Arch` and `HS/Bevy` submenus (DGS, BareBone unchanged). Selecting a mode also rewrites `ClientMain.Port` in the Client.unity scene file via SerializedObject so the Inspector matches the freshly selected target.
 - **Compile-time flavors via publish scripts.** `scripts/publish_windows.ps1 -GodMode` and `scripts/publish_linux.sh --god-mode` pass `-p:GodModeDefault=true` → csproj appends `GODMODE_DEFAULT` define → `Program.cs` flips `Config.GodMode` to true by default. Output lands in `publish-godmode/` so normal and godmode binaries coexist. Pattern extensible — copy 3 layers for any new flavor.
 - **Rust client diagnostic gated** behind `diag` Cargo feature (`cargo build --release --features diag` writes `dgsvshs_client.log` next to the host). Off by default — no per-send `format!` allocation overhead.
+- **MicroVM build scripts for all three legs.** Bevy already had `rust/build_microvm_aarch64.sh`. Added matching scripts for Arch (`csharp_arch_server/build_microvm_aarch64.sh`) and Unity DGS (`DGSvsHS/build_microvm_aarch64.sh`). All three follow the same pattern: Alpine `linux-virt` aarch64 kernel + virtio_net modules from the kernel apk, custom `/init` shell script as PID 1, QEMU `virt` machine with user-mode networking + UDP port forward. Rootfs sourcing differs by leg (Rust = static musl ELF as `/init`; Arch = Docker buildx Alpine 3.21 musl + msquic; Unity = Docker buildx Debian bookworm-slim glibc + Unity Linux Server ARM64 build). Output of all three is `vmlinuz-virt + initramfs.cpio.gz` — not a qcow2/raw disk image. Suitable for direct QEMU boot or Firecracker; for Proxmox VE deployment use direct-kernel-boot via `args:` in `/etc/pve/qemu-server/VMID.conf` (see §10.1 below).
 
 ### 11.2 Current state per leg
 
@@ -412,7 +449,7 @@ This section supersedes §4–§6 for "where we are right now." The earlier §5 
 
 1. **Audit `rust/gameplay/src/network/plugin.rs` snapshot send path.** Verify it composes per-recipient deltas with priority selection (the codec functions are there; the plugin orchestration may still be sending naïve fulls). If not, port the orchestration logic from `csharp_arch_server/Net/QuicServer.cs::BroadcastSnapshot`.
 2. **Cross-stack QUIC interop smoke test.** quinn (client) ↔ quiche (Bevy) and quinn (client) ↔ msquic (Arch) both follow RFC 9000 + 9221 but minor differences (datagram size advertisement, stream FIN timing) occasionally surface. Have not seen the user run the Bevy server against the Unity HS client end-to-end yet.
-3. **Microvm build for Arch server.** Bevy has `rust/build_microvm_aarch64.sh`. Arch needs an equivalent — likely a Dockerfile + Firecracker init or a single-file self-contained .NET 10 binary + minimal Alpine rootfs. Pending design choice from user (deferred during the v4 work).
+3. **x86_64 variant of the microvm scripts.** Current scripts target aarch64 (matches the Rust one; works on Apple Silicon `hvf` and Ampere Linux `kvm`). Samuel's `pve01` Proxmox homelab is x86_64 — running the aarch64 microvms there falls back to QEMU TCG software emulation, which invalidates power-measurement trials. For pve01 deployment, port each script: swap `linux-musl-arm64` → `linux-musl-x64` (Arch), `aarch64` → `x86_64` Docker platform, `aarch64-unknown-linux-musl` → `x86_64-unknown-linux-musl` (Rust), `vmlinuz-virt` aarch64 apk → x86_64 apk, `qemu-system-aarch64` `virt`/`hvf` → `qemu-system-x86_64` `q35`/`kvm`, console arg `ttyAMA0` → `ttyS0`. Architectural choice deferred — keep aarch64 for Hetzner Ampere trials, add x86_64 for pve01 trials.
 4. **Per-player RTT plumbing into `ctx.PlayerRttMs[]` on Arch.** Currently hardcoded 60 ms default → RewindResolve's view-time is uniform across all shooters. StirlingLabs.MsQuic doesn't expose RTT directly; need to call msquic's `QUIC_PARAM_CONN_STATISTICS` via the raw bindings each tick. Low impact unless measuring lag-comp effects in trials.
 5. **NDJSON harness output format.** TrialRunner produces NDJSON on the client side; servers need to emit equivalent per-tick stats (ms/tick, RAM, RSS, enemy count) for power-correlation. The heartbeat lines are already in the apples-to-apples format (`SERVER STATS | RAM (RSS): X.XX MB | RAM (VM) : Y.YY MB | Uptime: Z.Zs | tick=N bodies=N state=...`) — needs an `--output trial.ndjson` flag too.
 6. **Power measurement integration.** Out of code scope; wattmeter feeds a separate log that gets joined to server NDJSON by timestamp post-hoc.
@@ -432,6 +469,9 @@ This section supersedes §4–§6 for "where we are right now." The earlier §5 
 - `rust/gameplay/src/network/codec.rs` — Bevy wire codec, v4
 - `rust/gameplay/src/network/plugin.rs` — Bevy QUIC plugin (snapshot send path **needs audit**)
 - `native/quic_client/src/client.rs` — Rust QUIC client used by Unity HS via FFI; diag log gated behind `diag` feature
+- `rust/build_microvm_aarch64.sh` — Bevy microvm (static musl `cli` as `/init`, no rootfs needed)
+- `csharp_arch_server/build_microvm_aarch64.sh` — Arch microvm (Docker buildx → Alpine musl rootfs with msquic, .NET self-contained publish at `/opt/app`, port 7778)
+- `DGSvsHS/build_microvm_aarch64.sh` — Unity DGS microvm (Docker buildx → Debian glibc rootfs, Unity ARM64 Linux Server build at `/opt/app`, port 7777, takes optional build-dir arg)
 
 ### 11.5 Bugs already fixed (don't re-introduce)
 

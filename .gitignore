@@ -180,6 +180,30 @@ Cargo.lock.bak
 # *.mp3
 
 # ---------------------------------------------------------------------
+# MicroVM build artifacts — `build_microvm_*.sh` scripts drop large
+# kernel + initramfs + ISO + extracted rootfs trees into these dirs.
+# Tens of thousands of files (Unity build copy, Docker rootfs export,
+# .NET publish output, apk_extract scratch). Always regenerable.
+# ---------------------------------------------------------------------
+.microvm_x86_64/
+.microvm_aarch64/
+
+# All publish folders — `dotnet publish` outputs, microvm build contexts, flavor publishes
+publish/
+publish-*/
+
+# Final microvm ISO artifacts (also large — hundreds of MB each)
+*-microvm.iso
+
+# Diagnostic log dumps from the qm terminal -> log.txt workflow.
+# These accumulate at the repo root during debugging sessions.
+/log.txt
+
+# Local Python venv used to host the `zig` toolchain (cargo-zigbuild needs it
+# for Bevy microvm builds). Per-developer local env, never source.
+/zig-venv/
+
+# ---------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------
 *.log
