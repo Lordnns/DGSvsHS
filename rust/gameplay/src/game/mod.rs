@@ -1,4 +1,5 @@
 pub mod constants;
+pub mod sim;
 pub mod spatial;
 pub mod stress;
 pub mod types;
