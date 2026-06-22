@@ -79,7 +79,13 @@ namespace DGSvsHS.Server
         private void Awake()
         {
             Application.runInBackground = true;
-            Application.targetFrameRate = -1;
+            // Outer Update at 125 Hz (8 ms) = exact 2:1 ratio against the
+            // 62.5 Hz sim (16 ms). Network polling and Update overhead are
+            // matched across all three servers (DGS/Arch/Bevy) so the per-
+            // Update-callback cost cancels out in the comparison instead of
+            // being a per-server confound. Sim still fires deterministically
+            // every other Update via the accumulator in DriveSim().
+            Application.targetFrameRate = 125;
             QualitySettings.vSyncCount = 0;
 
             _state = ServerLifecycle.Booting;

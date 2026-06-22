@@ -88,6 +88,21 @@ namespace DGSvsHS.Client
 
         private void Awake()
         {
+#if HS_TARGET_BEVY
+      const string flavor = "HS_TARGET_BEVY";
+#elif HS_TARGET_ARCH
+            const string flavor = "HS_TARGET_ARCH";
+#elif WITH_DGS
+      const string flavor = "WITH_DGS";
+#else
+      const string flavor = "(none)";
+#endif
+            // Parse --server/--port/--bot-id from the process command line. Lets the
+            // Bot Harness editor window spawn N copies of this exe with deterministic
+            // autopilots without needing TrialRunner in the scene.
+            ApplyCommandLineArgs();
+            Debug.Log($"[ClientMain] Awake flavor={flavor} Host={Host} Port={Port}");
+
             _camera = Camera.main;
             if (_camera == null)
             {
@@ -121,11 +136,66 @@ namespace DGSvsHS.Client
             _net.Connected += OnConnected;
             _net.Disconnected += OnDisconnected;
             _net.SnapshotReceived += OnSnapshot;
+
+            StartCoroutine(StateWatcher());
         }
 
         private void Start()
         {
-            if (AutoConnect) _net.Connect(Host, Port);
+            if (AutoConnect)
+            {
+                Debug.Log($"[ClientMain] Start — auto-connecting to {Host}:{Port}");
+                _net.Connect(Host, Port);
+            }
+            else
+            {
+                Debug.Log("[ClientMain] Start — AutoConnect is OFF, not connecting");
+            }
+        }
+
+        /// <summary>
+        /// Parse `--server H`, `--port P`, `--bot-id N`, `--seed S` from the process
+        /// command line. Overrides Inspector values when present. Called from Awake
+        /// before any networking/autopilot setup so the values are live by Start().
+        ///
+        /// Args use the `--key value` convention to match TrialRunner. Unknown args
+        /// are ignored (Unity itself injects a few like `-screen-width`).
+        /// </summary>
+        private void ApplyCommandLineArgs()
+        {
+            string[] args = System.Environment.GetCommandLineArgs();
+            int botId = -1;
+            ulong seed = 1;
+            for (int i = 0; i < args.Length - 1; i++)
+            {
+                string k = args[i];
+                string v = args[i + 1];
+                switch (k)
+                {
+                    case "--server": Host = v; break;
+                    case "--port":   if (ushort.TryParse(v, out var p)) Port = p; break;
+                    case "--bot-id": if (int.TryParse(v, out var b)) botId = b; break;
+                    case "--seed":   if (ulong.TryParse(v, out var s)) seed = s; break;
+                }
+            }
+            if (botId >= 0 && botId < Constants.MaxPlayers)
+            {
+                AutoPilot = new AutoPilot((byte)botId, seed);
+                Debug.Log($"[ClientMain] CLI: bot-id={botId} seed={seed} → AutoPilot attached");
+            }
+        }
+
+        // Diagnostic: prints connection state once per second so we can see
+        // whether it's stuck in Connecting (handshake hung), flipping to
+        // Disconnected (handshake rejected), or sitting in Connected.
+        private System.Collections.IEnumerator StateWatcher()
+        {
+            var wait = new WaitForSeconds(1f);
+            while (true)
+            {
+                Debug.Log($"[ClientMain] state={_net?.State} rtt={_net?.OneWayLatencyMs}ms");
+                yield return wait;
+            }
         }
 
         private void OnDestroy()

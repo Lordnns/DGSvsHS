@@ -6,6 +6,11 @@ using DGSvsHS.Client;
 using DGSvsHS.Gameplay;
 using UnityEngine;
 
+// AutoPilot lives in DGSvsHS.Client since 2026-06-18 (so ClientMain can
+// instantiate it directly from --bot-id CLI). Aliased here so the existing
+// `new AutoPilot(...)` call below keeps working unchanged.
+using AutoPilot = DGSvsHS.Client.AutoPilot;
+
 namespace DGSvsHS.Harness
 {
     /// <summary>

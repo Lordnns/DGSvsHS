@@ -58,7 +58,7 @@ pub const MAX_ENEMIES: usize = 15000;
 // ---------- Rounds ----------
 pub const TOTAL_ROUNDS: u32 = 10;
 pub const INTER_ROUND_DELAY_SEC: f32 = 3.0;
-pub const BASE_ENEMIES_PER_ROUND: u32 = 700;
+pub const BASE_ENEMIES_PER_ROUND: u32 = 70000;
 pub const ENEMY_SCALING_PER_ROUND: f32 = 1.4;
 pub const ROUND_SPAWN_WINDOW_SEC: f32 = 18.0;
 

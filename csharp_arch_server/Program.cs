@@ -119,8 +119,16 @@ public static class Program
         }
 
         // ---------- Main loop ----------
+        // Outer loop = 125 Hz (8 ms). Sim runs every other outer tick = 62.5 Hz.
+        // The 2:1 ratio matches DGS (targetFrameRate=125) and Bevy
+        // (ScheduleRunnerPlugin::run_loop(1/125)), so per-Update overhead is a
+        // constant across the three-server comparison instead of asymmetric.
+        // PollEvents / SetServerTick run every 8 ms; the sim block (TickAdvance
+        // → BroadcastSnapshot) only runs on every second outer iteration.
+        var outerPeriodTicks = Stopwatch.Frequency * Constants.SimTickMs / 1000 / 2; // 8 ms
         var nextTickTime = Stopwatch.GetTimestamp();
         var running = true;
+        ulong outerCounter = 0;
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; running = false; };
 
         while (running)
@@ -132,10 +140,14 @@ public static class Program
                 if (remainingMs > 2) Thread.Sleep(1);
                 now = Stopwatch.GetTimestamp();
             }
-            nextTickTime += Stopwatch.Frequency * Constants.SimTickMs / 1000;
+            nextTickTime += outerPeriodTicks;
 
             quic?.PollEvents();
             quic?.SetServerTick(ctx.Tick);
+
+            // Sim fires on every other outer tick (16 ms = 62.5 Hz sim rate).
+            bool simThisOuterTick = (++outerCounter & 1UL) == 0;
+            if (!simThisOuterTick) continue;
 
             // ---- Drive sim (matches DedicatedServerMain.DriveSim) ----
             if (state == ServerLifecycle.Running)

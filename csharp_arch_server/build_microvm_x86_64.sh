@@ -11,6 +11,25 @@ cd "$PROJECT_ROOT"
 #   - qemu-system-x86_64 + cpio + gzip + curl
 # On Linux x86_64 host (Ryzen / Proxmox / Hetzner): accel=kvm is native speed.
 # On macOS Intel: accel=hvf. On WSL or any non-KVM host: drop the accel flag (TCG).
+#
+# Usage:
+#   ./build_microvm_x86_64.sh             # normal build
+#   ./build_microvm_x86_64.sh --god-mode  # build with GODMODE_DEFAULT (-> *-godmode artifacts)
+
+god_mode=0
+for arg in "$@"; do
+    case "$arg" in
+        --god-mode) god_mode=1 ;;
+        *) echo "[build] unknown arg: $arg" >&2; exit 2 ;;
+    esac
+done
+flavor_suffix=""
+godmode_props=()
+if [[ $god_mode -eq 1 ]]; then
+    flavor_suffix="-godmode"
+    godmode_props=(-p:GodModeDefault=true)
+fi
+echo "==> Flavor: ${flavor_suffix:-normal}"
 
 # Static IP configuration baked into init.sh. Override at build time, e.g.:
 #   STATIC_IP=192.168.1.50 STATIC_GATEWAY=192.168.1.1 ./build_microvm_x86_64.sh
@@ -26,7 +45,8 @@ dotnet publish -c Release \
                --self-contained true \
                -p:PublishSingleFile=true \
                -p:IncludeAllContentForSelfExtract=true \
-               -o publish-microvm
+               "${godmode_props[@]}" \
+               -o "publish-microvm${flavor_suffix}"
 
 mkdir -p .microvm_x86_64
 cd .microvm_x86_64
@@ -50,7 +70,7 @@ else
 fi
 
 rm -rf publish
-cp -a ../publish-microvm publish
+cp -a "../publish-microvm${flavor_suffix}" publish
 
 cat > Dockerfile.microvm <<'DOCKEREOF'
 FROM --platform=linux/amd64 alpine:3.21
@@ -167,11 +187,11 @@ INITEOF
 
 echo "==> Building x86_64 rootfs via Docker buildx..."
 docker buildx build --platform linux/amd64 --load \
-    -t dgsvshs-arch-microvm-x64:latest \
+    -t "dgsvshs-arch-microvm-x64${flavor_suffix}:latest" \
     -f Dockerfile.microvm .
 
 echo "==> Exporting rootfs..."
-CID=$(docker create --platform linux/amd64 dgsvshs-arch-microvm-x64:latest)
+CID=$(docker create --platform linux/amd64 "dgsvshs-arch-microvm-x64${flavor_suffix}:latest")
 rm -rf rootfs_dir
 mkdir rootfs_dir
 docker export "$CID" | tar -x -C rootfs_dir
@@ -182,7 +202,7 @@ cp modules/*.ko rootfs_dir/lib/modules/
 
 echo "==> Packaging initramfs..."
 cd rootfs_dir
-find . | cpio -H newc -o 2>/dev/null | gzip -9 > ../initramfs.cpio.gz
+find . | cpio -H newc -o 2>/dev/null | gzip -9 > "../initramfs${flavor_suffix}.cpio.gz"
 cd ..
 
 echo "==> Packaging bootable ISO..."
@@ -196,21 +216,22 @@ EOF
 
 rm -rf iso_staging
 mkdir -p iso_staging/boot/grub
-cp vmlinuz-virt        iso_staging/boot/vmlinuz
-cp initramfs.cpio.gz   iso_staging/boot/initrd.img
+cp vmlinuz-virt                          iso_staging/boot/vmlinuz
+cp "initramfs${flavor_suffix}.cpio.gz"   iso_staging/boot/initrd.img
 
-cat > iso_staging/boot/grub/grub.cfg <<'GRUBEOF'
+flavor_label="${flavor_suffix:+ (godmode)}"
+cat > iso_staging/boot/grub/grub.cfg <<GRUBEOF
 set timeout=2
 set default=0
-menuentry "DGSvsHS Arch MicroVM" {
+menuentry "DGSvsHS Arch MicroVM${flavor_label}" {
     linux  /boot/vmlinuz console=tty0 console=ttyS0 cgroup_disable=memory,pids
     initrd /boot/initrd.img
 }
 GRUBEOF
 
-grub-mkrescue -o arch-microvm.iso iso_staging >/dev/null 2>&1
+grub-mkrescue -o "arch-microvm${flavor_suffix}.iso" iso_staging >/dev/null 2>&1
 rm -rf iso_staging
 
-echo "==> ISO ready: $(pwd)/arch-microvm.iso"
+echo "==> ISO ready: $(pwd)/arch-microvm${flavor_suffix}.iso"
 echo "    Upload via Proxmox UI > Storage > ISO Images > Upload."
 echo "    Create VM, set CD/DVD to this ISO, start. Logs in the Console tab."

@@ -13,6 +13,9 @@ use super::codec::{
 };
 use super::events::{ClientConnected, ClientDisconnected, ClientId, MsgKind, NetMsgIn, NetMsgOut};
 use crate::game::constants::MAX_PLAYERS;
+use crate::game::sim::components::{InputInbox, Lifecycle, RoundState, WorldClock};
+use crate::server::lifecycle::{kickoff_match, spawn_player};
+use crate::server::recipient::RecipientStates;
 
 const ALPN: &[u8] = b"dgsvshs/2";
 const LISTEN_ADDR: &str = "0.0.0.0:4433";
@@ -46,7 +49,7 @@ impl Plugin for NetworkPlugin {
             .add_message::<ClientConnected>()
             .add_message::<ClientDisconnected>()
             .add_systems(PreUpdate, (quic_tick_timeouts, quic_recv).chain())
-            .add_systems(Update, (tick_server_tick, dispatch_inbound, handle_disconnect))
+            .add_systems(Update, (sync_server_tick, dispatch_inbound).chain())
             .add_systems(PostUpdate, (quic_send_app, quic_send).chain());
     }
 }
@@ -70,12 +73,27 @@ impl PlayerSlots {
         self.slots[idx] = Some(client);
         Some(idx as u8)
     }
-    fn release(&mut self, client: ClientId) {
+    pub fn release(&mut self, client: ClientId) {
         for s in self.slots.iter_mut() {
             if *s == Some(client) {
                 *s = None;
             }
         }
+    }
+    /// Reverse lookup: which slot owns this client?
+    pub fn client_slot(&self, client: ClientId) -> Option<u8> {
+        self.slots
+            .iter()
+            .position(|s| *s == Some(client))
+            .map(|i| i as u8)
+    }
+    /// Forward lookup: which client owns this slot?
+    pub fn slot_client(&self, slot: u8) -> Option<ClientId> {
+        self.slots.get(slot as usize).copied().flatten()
+    }
+    /// Count of occupied slots.
+    pub fn occupied(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
     }
 }
 
@@ -504,33 +522,80 @@ fn validate_token(src: &SocketAddr, token: &[u8]) -> Option<ConnectionId<'static
     Some(ConnectionId::from_ref(&rest[addr.len()..]).into_owned())
 }
 
-fn tick_server_tick(mut t: ResMut<ServerTick>) {
-    t.0 = t.0.wrapping_add(1);
+/// Mirror Arch's `quic.SetServerTick(ctx.Tick)` — keep ServerTick aligned with
+/// the sim's WorldClock so ServerWelcome replies carry the correct value.
+fn sync_server_tick(clock: Res<WorldClock>, mut t: ResMut<ServerTick>) {
+    t.0 = clock.0;
 }
 
-// Inbound msg_type dispatch. Wire framing: first payload byte = msg_type,
-// rest = codec payload. Reliable control messages arrive on one fresh stream
-// per message (FIN-terminated). Unreliable game messages arrive as DATAGRAMs.
+// Inbound msg_type dispatch.
 //
-// For the smoke milestone we only handle ClientHello → ServerWelcome and
-// log Input. Sim plumbing comes in a later phase.
+// Wire framing differs by transport (matches csharp_arch_server/Net/WireCodec.cs):
+//   - Datagrams (Input): bytes = [msg_type:1][payload:N]
+//   - Streams (ClientHello / ServerWelcome): bytes = [length:u32 LE][msg_type:1][payload:N]
+//     where `length` is the byte count of the payload alone (NOT including msg_type).
+//     A single ClientHello on a fresh stream therefore arrives as 4+1+5 = 10 bytes.
+//
+// On ClientHello → assign slot, spawn Player entity, reply ServerWelcome (with
+// stream framing), and if the server is Idle bump it to Running (mirror
+// Program.cs lines 82–91).
+// On Input → push into the sim's InputInbox keyed by slot, and stamp the
+// recipient's last-acked-server-tick so the broadcast system uses it as the
+// delta baseline (mirror QuicServer.cs::OnDatagramReceived lines 311–353).
 //
 // Stream chunking caveat: a logical message may arrive across multiple
 // `NetMsgIn { kind: Stream { .. } }` events if it exceeds the per-call read
-// buffer. ClientHello (5 bytes) is single-chunk; revisit when we add larger
-// reliable messages.
+// buffer. ClientHello (10 bytes framed) is single-chunk; revisit if we add
+// larger reliable messages.
 fn dispatch_inbound(
     mut inbound: MessageReader<NetMsgIn>,
     mut outbound: MessageWriter<NetMsgOut>,
     mut slots: ResMut<PlayerSlots>,
+    mut input_inbox: ResMut<InputInbox>,
+    mut recipients: ResMut<RecipientStates>,
+    mut lifecycle: ResMut<Lifecycle>,
+    mut round: ResMut<RoundState>,
+    clock: Res<WorldClock>,
     server_tick: Res<ServerTick>,
+    mut commands: Commands,
 ) {
     for msg in inbound.read() {
         if msg.payload.is_empty() {
             continue;
         }
-        let msg_type = msg.payload[0];
-        let mut r = R::new(&msg.payload[1..]);
+        // Strip stream framing if needed: streams carry [length:u32 LE][msg_type:1][payload].
+        // Datagrams carry [msg_type:1][payload] with no length prefix.
+        let (msg_type, payload_slice) = match msg.kind {
+            MsgKind::Stream { .. } => {
+                if msg.payload.len() < 5 {
+                    warn!(
+                        "[Proto] stream chunk too short ({} B) from client {} — need ≥5 for framing",
+                        msg.payload.len(),
+                        msg.client.0
+                    );
+                    continue;
+                }
+                let len = u32::from_le_bytes([
+                    msg.payload[0],
+                    msg.payload[1],
+                    msg.payload[2],
+                    msg.payload[3],
+                ]) as usize;
+                let total = 4 + 1 + len;
+                if msg.payload.len() < total {
+                    warn!(
+                        "[Proto] stream chunk {} B but framed length wants {} from client {} — chunked stream not yet supported",
+                        msg.payload.len(),
+                        total,
+                        msg.client.0
+                    );
+                    continue;
+                }
+                (msg.payload[4], &msg.payload[5..5 + len])
+            }
+            MsgKind::Datagram => (msg.payload[0], &msg.payload[1..]),
+        };
+        let mut r = R::new(payload_slice);
 
         match msg_type {
             MSG_CLIENT_HELLO => {
@@ -551,6 +616,7 @@ fn dispatch_inbound(
                     );
                     continue;
                 }
+                let already_assigned = slots.client_slot(msg.client).is_some();
                 let Some(slot) = slots.assign(msg.client) else {
                     error!("[Proto] no free player slot for client {}", msg.client.0);
                     continue;
@@ -560,30 +626,75 @@ fn dispatch_inbound(
                     version, msg.client.0, slot
                 );
 
-                let mut welcome = vec![MSG_SERVER_WELCOME];
-                write_server_welcome(&mut welcome, slot, server_tick.0);
+                if !already_assigned {
+                    spawn_player(&mut commands, slot);
+                    // Lifecycle: Idle → Running on first real connect.
+                    if *lifecycle == Lifecycle::Idle {
+                        kickoff_match(&mut round);
+                        *lifecycle = Lifecycle::Running;
+                        info!(
+                            "[server] state: Idle → Running tick={} (first client)",
+                            clock.0
+                        );
+                    }
+                }
 
-                // Reply on the same stream (if it was a stream) with FIN so
-                // the client knows the message is complete.
-                let reply_kind = match msg.kind {
-                    MsgKind::Stream { id, .. } => MsgKind::Stream { id, fin: true },
-                    MsgKind::Datagram => MsgKind::Datagram,
+                // Build ServerWelcome payload (codec body only — no msg_type, no length).
+                let mut welcome_payload: Vec<u8> = Vec::with_capacity(13);
+                write_server_welcome(&mut welcome_payload, slot, server_tick.0);
+
+                // Frame for the matching transport:
+                //   stream → [length:u32 LE][msg_type:1][payload]
+                //   datagram → [msg_type:1][payload]
+                let (reply_kind, framed) = match msg.kind {
+                    MsgKind::Stream { id, .. } => {
+                        let mut buf = Vec::with_capacity(4 + 1 + welcome_payload.len());
+                        buf.extend_from_slice(&(welcome_payload.len() as u32).to_le_bytes());
+                        buf.push(MSG_SERVER_WELCOME);
+                        buf.extend_from_slice(&welcome_payload);
+                        (MsgKind::Stream { id, fin: true }, buf)
+                    }
+                    MsgKind::Datagram => {
+                        let mut buf = Vec::with_capacity(1 + welcome_payload.len());
+                        buf.push(MSG_SERVER_WELCOME);
+                        buf.extend_from_slice(&welcome_payload);
+                        (MsgKind::Datagram, buf)
+                    }
                 };
                 outbound.write(NetMsgOut {
                     client: msg.client,
                     kind: reply_kind,
-                    payload: welcome,
+                    payload: framed,
                 });
             }
 
             MSG_INPUT => {
+                let Some(slot) = slots.client_slot(msg.client) else {
+                    // Input arriving from a client that hasn't sent ClientHello
+                    // yet. Drop silently (client should retry once welcomed).
+                    continue;
+                };
                 let mut cmds = Vec::with_capacity(4);
                 match read_input_batch(&mut r, &mut cmds) {
-                    Ok(n) => info!(
-                        "[Proto] Input batch n={} client={} newest_tick={}",
-                        n, msg.client.0, cmds[0].tick
+                    Ok(_) => {
+                        let mut batch_max_tick = 0u32;
+                        let mut batch_max_ack = 0u32;
+                        for cmd in &cmds {
+                            if cmd.tick > batch_max_tick {
+                                batch_max_tick = cmd.tick;
+                            }
+                            if cmd.last_acked_server_tick > batch_max_ack {
+                                batch_max_ack = cmd.last_acked_server_tick;
+                            }
+                            input_inbox.0.push((slot, *cmd));
+                        }
+                        recipients.record_input_tick(slot, batch_max_tick);
+                        recipients.record_pending_ack(slot, batch_max_ack);
+                    }
+                    Err(e) => error!(
+                        "[Proto] Input decode from slot {}: {:?}",
+                        slot, e
                     ),
-                    Err(e) => error!("[Proto] Input decode: {:?}", e),
                 }
             }
 
@@ -594,16 +705,6 @@ fn dispatch_inbound(
                 );
             }
         }
-    }
-}
-
-fn handle_disconnect(
-    mut events: MessageReader<ClientDisconnected>,
-    mut slots: ResMut<PlayerSlots>,
-) {
-    for e in events.read() {
-        slots.release(e.client);
-        info!("[Proto] released slot for client {}", e.client.0);
     }
 }
 

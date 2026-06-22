@@ -90,8 +90,10 @@ namespace DGSvsHS.Net.Quic
 
         public void Connect(string host, ushort port)
         {
+            Debug.Log($"[QuicNetworkClient] Connect({host}:{port}) — calling native dgs_client_connect");
             State = ConnectionState.Connecting;
             int rc = dgs_client_connect(_h, host, port);
+            Debug.Log($"[QuicNetworkClient] dgs_client_connect returned rc={rc}");
             if (rc < 0)
             {
                 State = ConnectionState.Disconnected;
@@ -105,7 +107,8 @@ namespace DGSvsHS.Net.Quic
             using var ms = new MemoryStream(_sendScratch);
             using var w = new BinaryWriter(ms);
             WireCodec.WriteClientHello(w, 0);
-            dgs_client_send(_h, WireCodec.MsgClientHello, _sendScratch, (int)ms.Position);
+            int sendRc = dgs_client_send(_h, WireCodec.MsgClientHello, _sendScratch, (int)ms.Position);
+            Debug.Log($"[QuicNetworkClient] sent ClientHello ({(int)ms.Position} B) rc={sendRc}");
         }
 
         public void SendInput(in InputCmd cmd)

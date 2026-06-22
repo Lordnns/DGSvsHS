@@ -10,6 +10,25 @@ cd "$PROJECT_ROOT"
 #   - docker with buildx + binfmt_misc (cross-arch image build)
 #   - qemu-system-aarch64 + cpio + gzip + curl
 # On Apple Silicon: -accel=hvf works natively. On Linux: change to kvm. On WSL: tcg (slow).
+#
+# Usage:
+#   ./build_microvm_aarch64.sh             # normal build
+#   ./build_microvm_aarch64.sh --god-mode  # build with GODMODE_DEFAULT (-> *-godmode artifacts)
+
+god_mode=0
+for arg in "$@"; do
+    case "$arg" in
+        --god-mode) god_mode=1 ;;
+        *) echo "[build] unknown arg: $arg" >&2; exit 2 ;;
+    esac
+done
+flavor_suffix=""
+godmode_props=()
+if [[ $god_mode -eq 1 ]]; then
+    flavor_suffix="-godmode"
+    godmode_props=(-p:GodModeDefault=true)
+fi
+echo "==> Flavor: ${flavor_suffix:-normal}"
 
 # Static IP configuration baked into init.sh. Override at build time, e.g.:
 #   STATIC_IP=192.168.1.50 STATIC_GATEWAY=192.168.1.1 ./build_microvm_aarch64.sh
@@ -25,7 +44,8 @@ dotnet publish -c Release \
                --self-contained true \
                -p:PublishSingleFile=true \
                -p:IncludeAllContentForSelfExtract=true \
-               -o publish-microvm
+               "${godmode_props[@]}" \
+               -o "publish-microvm${flavor_suffix}"
 
 mkdir -p .microvm_aarch64
 cd .microvm_aarch64
@@ -49,7 +69,7 @@ else
 fi
 
 rm -rf publish
-cp -a ../publish-microvm publish
+cp -a "../publish-microvm${flavor_suffix}" publish
 
 cat > Dockerfile.microvm <<'DOCKEREOF'
 FROM --platform=linux/arm64 alpine:3.21
@@ -155,11 +175,11 @@ INITEOF_BOTTOM
 
 echo "==> Building aarch64 rootfs via Docker buildx..."
 docker buildx build --platform linux/arm64 --load \
-    -t dgsvshs-arch-microvm:latest \
+    -t "dgsvshs-arch-microvm${flavor_suffix}:latest" \
     -f Dockerfile.microvm .
 
 echo "==> Exporting rootfs..."
-CID=$(docker create --platform linux/arm64 dgsvshs-arch-microvm:latest)
+CID=$(docker create --platform linux/arm64 "dgsvshs-arch-microvm${flavor_suffix}:latest")
 rm -rf rootfs_dir
 mkdir rootfs_dir
 docker export "$CID" | tar -x -C rootfs_dir
@@ -170,7 +190,7 @@ cp modules/*.ko rootfs_dir/lib/modules/
 
 echo "==> Packaging initramfs..."
 cd rootfs_dir
-find . | cpio -H newc -o 2>/dev/null | gzip -9 > ../initramfs.cpio.gz
+find . | cpio -H newc -o 2>/dev/null | gzip -9 > "../initramfs${flavor_suffix}.cpio.gz"
 cd ..
 
 echo "==> Booting MicroVM via QEMU (UDP 7778 forwarded to host)..."
@@ -179,7 +199,7 @@ qemu-system-aarch64 \
   -cpu host \
   -m 1024 \
   -kernel vmlinuz-virt \
-  -initrd initramfs.cpio.gz \
+  -initrd "initramfs${flavor_suffix}.cpio.gz" \
   -append "console=ttyAMA0 cgroup_disable=memory,pids" \
   -nographic \
   -netdev user,id=net0,hostfwd=udp::7778-:7778 \

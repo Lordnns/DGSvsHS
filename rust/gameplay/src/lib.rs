@@ -1,27 +1,69 @@
 mod system_metrics;
 pub mod game;
 pub mod network;
+pub mod server;
 
 use std::time::Duration;
-use bevy::app::ScheduleRunnerPlugin;
+use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::log::{LogPlugin, info};
 use bevy::prelude::*;
 
 use mimalloc::MiMalloc;
 
+use crate::game::constants::TICKS_PER_SECOND;
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-pub fn setup_server() {
-    info!("Welcome to the playground! ECS is alive.");
+/// CLI-driven server config. Mirrors the relevant subset of
+/// `csharp_arch_server/Program.cs::Config`.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    pub seed: u64,
+    pub god_mode: bool,
+    /// If set, the server exits after this many wall-clock seconds (trial mode).
+    pub run_for_seconds: Option<f32>,
 }
 
-pub fn launch_server(){
-    App::new()
-        .add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(
-            Duration::from_secs_f64(1.0 / 240.0),
-        )))
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            seed: 0xC0FF_EEF0_0D,
+            god_mode: false,
+            run_for_seconds: None,
+        }
+    }
+}
+
+fn setup_server(cfg: Res<ServerConfigResource>) {
+    info!(
+        "DGSvsHS Bevy server boot — seed=0x{:X} godMode={} (sim + QUIC + per-recipient delta snapshots)",
+        cfg.0.seed, cfg.0.god_mode
+    );
+}
+
+#[derive(Resource, Clone)]
+struct ServerConfigResource(pub ServerConfig);
+
+#[derive(Resource)]
+struct DurationCap {
+    started: std::time::Instant,
+    deadline: Duration,
+}
+
+pub fn launch_server(cfg: ServerConfig) {
+    // Outer schedule rate = 125 Hz (8 ms), sim rate = 62.5 Hz (16 ms via
+    // Time::<Fixed>::from_hz in SimPlugin). The 2:1 integer ratio means
+    // FixedUpdate fires *deterministically* every other outer Update — no
+    // accumulator jitter (jitter would only appear with a non-integer ratio
+    // like the old 240:62.5 = 3.84:1). All three servers (DGS/Arch/Bevy)
+    // run this exact 125/62.5 cadence so per-Update overhead is identical
+    // across the comparison.
+    let tick_period = Duration::from_secs_f64(1.0 / 125.0);
+
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins.set(ScheduleRunnerPlugin::run_loop(tick_period)))
         .add_plugins(LogPlugin::default())
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(LogDiagnosticsPlugin {
@@ -29,8 +71,32 @@ pub fn launch_server(){
             ..Default::default()
         })
         .add_plugins(system_metrics::MicroSystemMetrics)
+        .add_plugins(game::sim::SimPlugin {
+            seed: cfg.seed,
+            god_mode: cfg.god_mode,
+        })
         .add_plugins(network::NetworkPlugin)
-        .add_plugins(game::StressPlugin)
-        .add_systems(Startup, setup_server)
-        .run();
+        .add_plugins(server::ServerPlugin)
+        .insert_resource(ServerConfigResource(cfg.clone()))
+        .add_systems(Startup, setup_server);
+
+    if let Some(secs) = cfg.run_for_seconds {
+        app.insert_resource(DurationCap {
+            started: std::time::Instant::now(),
+            deadline: Duration::from_secs_f32(secs),
+        });
+        app.add_systems(Last, duration_cap_system);
+    }
+
+    app.run();
+}
+
+fn duration_cap_system(cap: Res<DurationCap>, mut exit: MessageWriter<AppExit>) {
+    if cap.started.elapsed() >= cap.deadline {
+        info!(
+            "[server] duration cap reached ({}s) — shutting down",
+            cap.deadline.as_secs_f32()
+        );
+        exit.write(AppExit::Success);
+    }
 }
