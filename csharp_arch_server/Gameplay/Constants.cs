@@ -52,12 +52,12 @@ public static class Constants
     public const float EnemySpeed = 2.5f;
     public const float EnemyRadius = 0.35f;
     public const int EnemyMaxHp = 1;
-    public const int MaxEnemies = 15000;
+    public const int MaxEnemies = 150000;
 
     // ---------- Rounds ----------
     public const int TotalRounds = 10;
     public const float InterRoundDelaySec = 3f;
-    public const int BaseEnemiesPerRound = 700;
+    public const int BaseEnemiesPerRound = 3000;
     public const float EnemyScalingPerRound = 1.4f;
     public const float RoundSpawnWindowSec = 18f;
 

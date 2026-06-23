@@ -2,6 +2,15 @@ use std::fs;
 use bevy::log::{error, info};
 use bevy::prelude::*;
 
+use crate::game::sim::components::{Enemy, Lifecycle, RoundState, WorldClock};
+
+/// Counts FixedUpdate runs in the current stats window. `write_stats_file`
+/// reads it, computes inner_fps as `tick_count / elapsed`, then resets to 0.
+#[derive(Resource, Default)]
+struct SimTickPace {
+    tick_count: u32,
+}
+
 pub struct MicroSystemMetrics;
 impl Plugin for MicroSystemMetrics {
     fn build(&self, app: &mut App) {
@@ -19,9 +28,16 @@ impl Plugin for MicroSystemMetrics {
         }
 
         if cfg!(target_os = "linux") {
-            app.add_systems(Update, log_metrics);
+            app.init_resource::<SimTickPace>()
+               .add_systems(FixedUpdate, sample_sim_tick_pace)
+               .add_systems(Update, (log_metrics, write_stats_file));
         }
     }
+}
+
+/// Runs on every FixedUpdate tick. Increments the in-window tick counter.
+fn sample_sim_tick_pace(mut pace: ResMut<SimTickPace>) {
+    pace.tick_count += 1;
 }
 
 #[cfg(target_os = "linux")]
@@ -231,14 +247,81 @@ fn read_total_vm_memory() -> Option<f64> {
     Some((t - a) / 1024.0)
 }
 
-fn log_metrics(time: Res<Time>, mut timer: Local<f32>) {
+/// Overwrites /tmp/stats.log every 50 ms with a single-line JSON snapshot
+/// the test-harness recorder grabs via `qm terminal` from the Proxmox host.
+fn write_stats_file(
+    time: Res<Time>,
+    mut acc: Local<f32>,
+    mut outer_frames: Local<u32>,
+    mut primed: Local<bool>,
+    mut pace: ResMut<SimTickPace>,
+    clock: Res<WorldClock>,
+    lifecycle: Res<Lifecycle>,
+    round: Res<RoundState>,
+    enemies: Query<(), With<Enemy>>,
+) {
+    *outer_frames += 1;
+    *acc += time.delta().as_secs_f32();
+    if *acc < 0.05 {
+        return;
+    }
+    if !*primed {
+        // First flush: counters reflect garbage warmup window — reset and skip.
+        *primed = true;
+        *acc = 0.0;
+        *outer_frames = 0;
+        pace.tick_count = 0;
+        return;
+    }
+    let elapsed = *acc;
+    let outer_fps = *outer_frames as f32 / elapsed;
+    // Sim FPS = ticks counted in the window / wall-clock elapsed, capped at
+    // outer_fps. The sim runs INSIDE the outer Update loop — a sim step that
+    // hasn't reached the next outer Update is not observable from the outside
+    // (no snapshot, no network broadcast). So capping at outer reflects the
+    // sim's externally-visible rate, which is what matters for the trial.
+    let inner_fps = (pace.tick_count as f32 / elapsed).min(outer_fps);
+    pace.tick_count = 0;
+    let alive = enemies.iter().count();
+    let spawned = round.spawn_target.saturating_sub(round.spawns_remaining);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    let json = format!(
+        "{{\"t\":{:.3},\"inner_fps\":{:.2},\"outer_fps\":{:.2},\"to_spawn\":{},\"spawned\":{},\"alive\":{},\"tick\":{},\"state\":\"{:?}\"}}\n",
+        t, inner_fps, outer_fps, round.spawn_target, spawned, alive, clock.0, *lifecycle,
+    );
+    let _ = fs::write("/tmp/stats.log", json);
+    *acc = 0.0;
+    *outer_frames = 0;
+}
+
+fn log_metrics(
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    clock: Res<WorldClock>,
+    lifecycle: Res<Lifecycle>,
+    round: Res<RoundState>,
+    enemies: Query<(), With<Enemy>>,
+) {
     *timer += time.delta().as_secs_f32();
     if *timer > 5.0 {
         // 3. Add explicit error handling so it doesn't fail silently
         match (read_memory_usage(), read_total_vm_memory()) {
             (Some(mb), Some(mb_vm)) => {
-                info!("SERVER STATS | RAM (RSS): {:.2} MB | RAM (VM) : {:.2} MB | Uptime: {:.1}s",
-                      mb, mb_vm, time.elapsed_secs());
+                let alive = enemies.iter().count();
+                info!(
+                    "SERVER STATS | RAM (RSS): {:.2} MB | RAM (VM) : {:.2} MB | Uptime: {:.1}s | tick={} bodies={} state={:?} toSpawn={}/{}",
+                    mb,
+                    mb_vm,
+                    time.elapsed_secs(),
+                    clock.0,
+                    alive,
+                    *lifecycle,
+                    round.spawns_remaining,
+                    round.spawn_target,
+                );
             }
             _ => {
                 error!("Could not read memory metrics from /proc! Is the pseudo-filesystem mounted?");

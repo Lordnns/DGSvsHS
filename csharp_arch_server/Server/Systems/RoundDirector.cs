@@ -82,8 +82,7 @@ public static class RoundDirector
     {
         if (forRound < 1) return 0;
         float scaled = Constants.BaseEnemiesPerRound * MathF.Pow(Constants.EnemyScalingPerRound, forRound - 1);
-        int t = (int)MathF.Round(scaled);
-        return Math.Min(Constants.MaxEnemies, t);
+        return (int)MathF.Round(scaled);
     }
 
     private static void TickWave(World world, SimContext ctx)

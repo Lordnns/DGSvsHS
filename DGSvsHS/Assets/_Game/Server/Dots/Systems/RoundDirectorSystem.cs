@@ -104,8 +104,7 @@ namespace DGSvsHS.Server.Dots
         {
             if (forRound < 1) return 0;
             float scaled = Constants.BaseEnemiesPerRound * math.pow(Constants.EnemyScalingPerRound, forRound - 1);
-            int t = (int)math.round(scaled);
-            return math.min(Constants.MaxEnemies, t);
+            return (int)math.round(scaled);
         }
 
         private void TickWave(EntityManager em, ref RoundState round, ref DeterministicRng rng, ref ushort nextId)

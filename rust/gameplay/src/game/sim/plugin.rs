@@ -210,8 +210,6 @@ mod tests {
         assert_eq!(target_enemies_for_round(0), 0);
         assert_eq!(target_enemies_for_round(1), 700);
         assert_eq!(target_enemies_for_round(2), 980); // 700 * 1.4
-        // Capped at MaxEnemies for absurd rounds.
-        assert!(target_enemies_for_round(50) <= MAX_ENEMIES as i32);
     }
 
     #[test]

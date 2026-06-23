@@ -1,6 +1,7 @@
 
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Numerics;
 using Arch.Core;
 using DGSvsHS.ArchServer.Net;
@@ -129,6 +130,15 @@ public static class Program
         var nextTickTime = Stopwatch.GetTimestamp();
         var running = true;
         ulong outerCounter = 0;
+        // 20 Hz stats writer (50 ms cadence) — overwrites /tmp/stats.log with a
+        // single-line JSON snapshot the test-harness recorder grabs via
+        // `qm terminal` from the Proxmox host.
+        var statsPeriodTicks = Stopwatch.Frequency / 20;
+        var statsNextDue = startupTicks + statsPeriodTicks;
+        var statsWindowStart = startupTicks;
+        ulong statsLastOuterCounter = 0;
+        uint statsLastInnerTick = 0;
+        bool statsPrimed = false;
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; running = false; };
 
         while (running)
@@ -202,6 +212,26 @@ public static class Program
                              ref heartbeatTickMsSum, ref heartbeatTickCount, quic);
             }
 
+            // ---- 20 Hz stats file (recorder reads via `qm terminal`) ----
+            if (now >= statsNextDue)
+            {
+                double statsElapsed = (now - statsWindowStart) / (double)Stopwatch.Frequency;
+                if (!statsPrimed)
+                {
+                    statsPrimed = true;
+                }
+                else if (statsElapsed > 0)
+                {
+                    WriteStatsFile(world, ctx, state, statsElapsed,
+                                   outerCounter - statsLastOuterCounter,
+                                   ctx.Tick - statsLastInnerTick);
+                }
+                statsLastOuterCounter = outerCounter;
+                statsLastInnerTick = ctx.Tick;
+                statsWindowStart = now;
+                statsNextDue = now + statsPeriodTicks;
+            }
+
             // ---- Duration cap ----
             if (cfg.RunForSeconds.HasValue)
             {
@@ -250,6 +280,30 @@ public static class Program
         ctx.Round.Round = 0;
         ctx.Round.InterRoundTimer = Constants.InterRoundDelaySec;
         ctx.Round.RoundTimer = 0f;
+    }
+
+    // ---------- 20 Hz stats file ----------
+
+    private static void WriteStatsFile(
+        World world, SimContext ctx, ServerLifecycle state, double elapsedSec,
+        ulong outerFramesDelta, uint innerTicksDelta)
+    {
+        double innerFps = innerTicksDelta / elapsedSec;
+        double outerFps = outerFramesDelta / elapsedSec;
+        int alive = SimBootstrap.CountEnemies(world);
+        int spawned = ctx.Round.SpawnTarget - ctx.Round.SpawnsRemaining;
+        double t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+        string json =
+            $"{{\"t\":{t.ToString("F3", CultureInfo.InvariantCulture)}," +
+            $"\"inner_fps\":{innerFps.ToString("F2", CultureInfo.InvariantCulture)}," +
+            $"\"outer_fps\":{outerFps.ToString("F2", CultureInfo.InvariantCulture)}," +
+            $"\"to_spawn\":{ctx.Round.SpawnTarget}," +
+            $"\"spawned\":{spawned}," +
+            $"\"alive\":{alive}," +
+            $"\"tick\":{ctx.Tick}," +
+            $"\"state\":\"{state}\"}}\n";
+        try { File.WriteAllText("/tmp/stats.log", json); }
+        catch { /* /tmp/ may not exist on Windows dev — silently skip */ }
     }
 
     // ---------- Heartbeat ----------

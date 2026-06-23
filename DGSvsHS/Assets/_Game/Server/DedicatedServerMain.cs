@@ -66,6 +66,13 @@ namespace DGSvsHS.Server
         // Transition detection — round/phase changes.
         private RoundPhase _prevPhase = RoundPhase.PreGame;
         private int _prevRound = -1;
+
+        // 20 Hz stats writer (50 ms cadence) — recorder grabs latest line via `qm terminal`.
+        private const float StatsIntervalSec = 0.05f;
+        private float _statsWindowStartTime;
+        private int _statsOuterFrames;
+        private int _statsInnerTicks;
+        private bool _statsPrimed;
         
         private EntityQuery _worldClockQuery;
         private EntityQuery _roundStateQuery;
@@ -220,6 +227,7 @@ namespace DGSvsHS.Server
                     break;
             }
 
+            WriteStatsFileIfDue();
             ApplyPendingTransition();
         }
 
@@ -240,6 +248,7 @@ namespace DGSvsHS.Server
 
                 _heartbeatTickMsSum += _tickStopwatch.Elapsed.TotalMilliseconds;
                 _heartbeatTickCount++;
+                _statsInnerTicks++;
 
                 // Broadcast snapshot
                 if (_snapshotScratch.Tick > 0)
@@ -413,6 +422,57 @@ namespace DGSvsHS.Server
             {
                 Debug.Log($"[Server] tick={GetCurrentTick()} server={_state} phase={rs.Phase} round={rs.Round} players={activePlayers} {stress}");
             }
+        }
+
+        // ---------- 20 Hz stats file ----------
+        // Overwrites /tmp/stats.log with a single JSON line. The test-harness
+        // recorder grabs it via `qm terminal` from the Proxmox host. Only
+        // emitted on Linux (the trial target); other platforms no-op silently.
+        private void WriteStatsFileIfDue()
+        {
+            _statsOuterFrames++;
+            float wallNow = Time.unscaledTime;
+            float elapsed = wallNow - _statsWindowStartTime;
+            if (elapsed < StatsIntervalSec) return;
+
+            if (!_statsPrimed)
+            {
+                _statsPrimed = true;
+                _statsWindowStartTime = wallNow;
+                _statsOuterFrames = 0;
+                _statsInnerTicks = 0;
+                return;
+            }
+
+            int toSpawn = 0;
+            int spawned = 0;
+            if (_roundStateQuery.CalculateEntityCount() > 0)
+            {
+                var rs = _roundStateQuery.GetSingleton<RoundState>();
+                toSpawn = rs.SpawnTarget;
+                spawned = rs.SpawnTarget - rs.SpawnsRemaining;
+            }
+            int alive = _enemyTagQuery.CalculateEntityCount();
+            float innerFps = _statsInnerTicks / elapsed;
+            float outerFps = _statsOuterFrames / elapsed;
+            double t = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
+
+            string json =
+                $"{{\"t\":{t.ToString("F3", System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"\"inner_fps\":{innerFps.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"\"outer_fps\":{outerFps.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)}," +
+                $"\"to_spawn\":{toSpawn}," +
+                $"\"spawned\":{spawned}," +
+                $"\"alive\":{alive}," +
+                $"\"tick\":{GetCurrentTick()}," +
+                $"\"state\":\"{_state}\"}}\n";
+
+            try { System.IO.File.WriteAllText("/tmp/stats.log", json); }
+            catch { /* /tmp/ may not exist (e.g. Windows dev) — silently skip */ }
+
+            _statsWindowStartTime = wallNow;
+            _statsOuterFrames = 0;
+            _statsInnerTicks = 0;
         }
     }
 }

@@ -27,7 +27,7 @@ def main():
         sys.exit(1)
 
     remote_code = f"""
-import time, json, sys, os
+import time, json, sys, os, subprocess, select, re
 vmid = "{args.vmid}"
 vm_type = "{args.type}"
 interval = 1.0 / {args.hz}
@@ -38,6 +38,56 @@ if vm_type == "qemu":
 else:
     cgroup_dir = f"/sys/fs/cgroup/lxc/{{vmid}}"
     net_iface = f"veth{{vmid}}i0"
+
+# --- Serial console reader (qemu/VM only) ---
+# Each microvm /init spawns an interactive sh on /dev/console; we attach to the
+# QEMU serial socket via socat (same mechanism `qm terminal` uses) and send
+# `cat /tmp/stats.log` per sample, capturing the JSON line each server writes
+# at 20 Hz. LXC doesn't have a serial socket so the merge is skipped there.
+serial_sock = f"/var/run/qemu-server/{{vmid}}.serial0"
+console_proc = None
+if vm_type == "qemu" and os.path.exists(serial_sock):
+    try:
+        console_proc = subprocess.Popen(
+            ["socat", "-", f"UNIX-CONNECT:{{serial_sock}}"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, bufsize=0)
+        # Wake the shell and drain its banner / motd.
+        console_proc.stdin.write(b"\\n")
+        console_proc.stdin.flush()
+        time.sleep(0.3)
+        try:
+            while True:
+                r, _, _ = select.select([console_proc.stdout], [], [], 0.05)
+                if not r: break
+                if not console_proc.stdout.read(4096): break
+        except Exception:
+            pass
+    except Exception as e:
+        sys.stderr.write(f"[recorder] could not open serial console: {{e}}\\n")
+        console_proc = None
+
+_json_re = re.compile(rb"\\{{\\s*\\\"t\\\".*?\\}}")
+
+def grab_server_stats():
+    if console_proc is None: return None
+    try:
+        console_proc.stdin.write(b"cat /tmp/stats.log\\n")
+        console_proc.stdin.flush()
+        deadline = time.time() + (interval * 0.5)
+        buf = b""
+        while time.time() < deadline:
+            r, _, _ = select.select([console_proc.stdout], [], [], 0.01)
+            if r:
+                chunk = console_proc.stdout.read(4096)
+                if chunk: buf += chunk
+        m = None
+        for hit in _json_re.finditer(buf):
+            m = hit
+        if m is None: return None
+        return json.loads(m.group(0).decode("utf-8", errors="ignore"))
+    except Exception:
+        return None
 
 def read_int(p):
     try:
@@ -73,7 +123,13 @@ while True:
         rx_r = (cur_rx - last_rx) / dt
         tx_r = (cur_tx - last_tx) / dt
 
-        print(json.dumps({{"t": t, "c": cpu_p, "m": mem, "rx": rx_r, "tx": tx_r}}))
+        sample = {{"t": t, "c": cpu_p, "m": mem, "rx": rx_r, "tx": tx_r}}
+        srv = grab_server_stats()
+        if srv:
+            for k in ("inner_fps", "outer_fps", "to_spawn", "spawned", "alive", "tick", "state"):
+                if k in srv: sample[k] = srv[k]
+
+        print(json.dumps(sample))
         sys.stdout.flush()
 
         last_time, last_cpu, last_rx, last_tx = t, cur_cpu, cur_rx, cur_tx

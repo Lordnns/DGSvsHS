@@ -18,52 +18,70 @@ METRICS = {
     'c': {'title': 'CPU Usage', 'ylabel': 'CPU Utilization (%)', 'scale': 1.0},
     'm': {'title': 'Memory Allocation', 'ylabel': 'Memory (MB)', 'scale': 1 / (1024 * 1024)},
     'rx': {'title': 'Network Ingress (Rx)', 'ylabel': 'Data Rate (KB/s)', 'scale': 1 / 1024},
-    'tx': {'title': 'Network Egress (Tx)', 'ylabel': 'Data Rate (KB/s)', 'scale': 1 / 1024}
+    'tx': {'title': 'Network Egress (Tx)', 'ylabel': 'Data Rate (KB/s)', 'scale': 1 / 1024},
+    'inner_fps': {'title': 'Sim FPS (Inner)', 'ylabel': 'Frames per Second', 'scale': 1.0},
+    'outer_fps': {'title': 'Update FPS (Outer)', 'ylabel': 'Frames per Second', 'scale': 1.0},
 }
-FLAVOR_COLORS = {'dgs': '#1f77b4', 'arch': '#ff7f0e', 'bevy': '#2ca02c'} # Blue, Orange, Green
+FLAVOR_COLORS     = {'dgs': '#1f77b4', 'arch': '#ff7f0e', 'bevy': '#2ca02c'} # Blue,    Orange,    Green       — CPU / single-metric plots
+FLAVOR_FPS_COLORS = {'dgs': '#0d3b66', 'arch': '#a04000', 'bevy': '#145214'} # Navy,    BurntOrng, ForestGrn   — FPS line on CPU-vs-FPS overlays (same family, darker)
 # ---------------------
 
 def parse_files():
-    """Reads all JSONL files and organizes them by flavor and run number."""
-    data = defaultdict(lambda: defaultdict(lambda: {m: [] for m in ['t', 'c', 'm', 'rx', 'tx']}))
+    """Reads all JSONL files and organizes them by flavor and run number.
+    Missing fields (e.g. inner_fps in pre-2026-06 runs) are stored as NaN so
+    averaging via np.nanmean ignores them per-column instead of crashing."""
+    fields = ['t'] + list(METRICS.keys())
+    data = defaultdict(lambda: defaultdict(lambda: {m: [] for m in fields}))
     run_numbers = set()
-    
+
     if not os.path.exists(RESULTS_DIR):
         print(f"[!] Directory '{RESULTS_DIR}' not found.")
         return None, None
 
     file_pattern = re.compile(r'(?i)(dgs|arch|bevy).*?_(\d+)\.jsonl$')
-    
+
     for filename in os.listdir(RESULTS_DIR):
         match = file_pattern.match(filename)
         if match:
             flavor = match.group(1).lower()
             run_num = int(match.group(2))
             run_numbers.add(run_num)
-            
+
             filepath = os.path.join(RESULTS_DIR, filename)
             with open(filepath, 'r') as f:
                 start_time = None
                 for line in f:
                     try:
                         row = json.loads(line.strip())
-                        if start_time is None:
-                            start_time = row['t']
-                        
-                        data[flavor][run_num]['t'].append(row['t'] - start_time)
-                        for m in METRICS.keys():
-                            data[flavor][run_num][m].append(row[m] * METRICS[m]['scale'])
-                    except (json.JSONDecodeError, KeyError):
+                    except json.JSONDecodeError:
                         continue
-                        
+                    if 't' not in row:
+                        continue
+                    if start_time is None:
+                        start_time = row['t']
+
+                    data[flavor][run_num]['t'].append(row['t'] - start_time)
+                    for m, m_info in METRICS.items():
+                        v = row.get(m)
+                        data[flavor][run_num][m].append(
+                            float('nan') if v is None else v * m_info['scale']
+                        )
+
     return data, sorted(list(run_numbers))
 
 def smooth_data(y, window_size):
-    """Applique une moyenne glissante simple en utilisant numpy."""
+    """Applique une moyenne glissante simple en utilisant numpy.
+    NaN-aware: NaN points are dropped from the kernel window per-position."""
     if window_size < 2 or len(y) < window_size:
         return y
-    # L'utilisation de mode='same' garantit que la longueur du tableau reste identique
-    return np.convolve(y, np.ones(window_size)/window_size, mode='same')
+    arr = np.asarray(y, dtype=float)
+    mask = (~np.isnan(arr)).astype(float)
+    filled = np.where(np.isnan(arr), 0.0, arr)
+    num = np.convolve(filled, np.ones(window_size), mode='same')
+    den = np.convolve(mask,    np.ones(window_size), mode='same')
+    with np.errstate(invalid='ignore', divide='ignore'):
+        out = np.where(den > 0, num / den, np.nan)
+    return out
 
 def plot_graph(x_data_dict, y_data_dict, title, ylabel, filename):
     """Utility to render and save a single SVG."""
@@ -95,6 +113,50 @@ def plot_graph(x_data_dict, y_data_dict, title, ylabel, filename):
     plt.savefig(filename, format='svg')
     plt.close()
 
+def plot_cpu_vs_fps(x_dict, cpu_dict, fps_dict, title, filename, fps_label='Sim FPS'):
+    """Dual-axis overlay: CPU% on the left, FPS on the right, one solid + one
+    dashed line per flavor. Lets the eye correlate cost vs throughput across
+    flavors on the same time base."""
+    has_any = any(
+        (cpu_dict.get(f) is not None and len(cpu_dict[f]) > 0) or
+        (fps_dict.get(f) is not None and len(fps_dict[f]) > 0)
+        for f in x_dict
+    )
+    if not has_any:
+        return
+
+    fig, ax_cpu = plt.subplots(figsize=(12, 6))
+    ax_fps = ax_cpu.twinx()
+
+    for flavor, x_vals in x_dict.items():
+        cpu_color = FLAVOR_COLORS.get(flavor, '#333333')
+        fps_color = FLAVOR_FPS_COLORS.get(flavor, '#777777')
+        cpu_vals = cpu_dict.get(flavor)
+        fps_vals = fps_dict.get(flavor)
+        if cpu_vals is not None and len(cpu_vals) > 0:
+            ax_cpu.plot(x_vals, smooth_data(cpu_vals, SMOOTHING_WINDOW),
+                        label=f"{flavor.upper()} CPU", color=cpu_color,
+                        linestyle='-', linewidth=1.5, alpha=0.85)
+        if fps_vals is not None and len(fps_vals) > 0:
+            ax_fps.plot(x_vals, smooth_data(fps_vals, SMOOTHING_WINDOW),
+                        label=f"{flavor.upper()} {fps_label}", color=fps_color,
+                        linestyle='--', linewidth=1.5, alpha=0.85)
+
+    ax_cpu.set_title(title, fontsize=14, fontweight='bold')
+    ax_cpu.set_xlabel("Elapsed Time (Seconds)", fontsize=11)
+    ax_cpu.set_ylabel("CPU Utilization (%)", fontsize=11)
+    ax_fps.set_ylabel(f"{fps_label} (Hz)", fontsize=11)
+    ax_cpu.grid(True, linestyle=':', alpha=0.7)
+
+    # Merge legends so solid (CPU) and dashed (FPS) entries appear together.
+    h1, l1 = ax_cpu.get_legend_handles_labels()
+    h2, l2 = ax_fps.get_legend_handles_labels()
+    ax_cpu.legend(h1 + h2, l1 + l2, loc="upper right", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(filename, format='svg')
+    plt.close(fig)
+
+
 def build_direct_averages(data):
     """Calculates pure mathematical averages for uniform high-frequency runs."""
     avg_data = defaultdict(dict)
@@ -115,10 +177,13 @@ def build_direct_averages(data):
         for metric in METRICS.keys():
             # Grab the arrays, truncate them to the exact same length, and stack them
             arrays = [data[flavor][r][metric][:min_len] for r in run_nums]
-            stacked_data = np.vstack(arrays)
-            
-            # Calculate the pure average straight down the columns
-            avg_data[flavor][metric] = np.mean(stacked_data, axis=0)
+            stacked_data = np.vstack(arrays).astype(float)
+
+            # NaN-aware mean — runs missing a metric (e.g. older recordings
+            # without inner_fps) drop out of the column average instead of
+            # poisoning the whole flavor average.
+            with np.errstate(invalid='ignore'):
+                avg_data[flavor][metric] = np.nanmean(stacked_data, axis=0)
                 
     return time_grids, avg_data
 
@@ -146,11 +211,28 @@ def main():
     for metric, m_info in METRICS.items():
         x_dict = {f: time_grids[f] for f in flavors if f in time_grids}
         y_dict = {f: avg_data[f].get(metric) for f in flavors if metric in avg_data.get(f, {})}
-        
+
         filename = f"{OUTPUT_DIR}/averages/Avg_{m_info['title'].replace(' ', '_')}.svg"
-        plot_graph(x_dict, y_dict, f"AVERAGE: {m_info['title']} (10 Runs)", m_info['ylabel'], filename)
-    
-    print("[+] Generated 4 Average Graphs.")
+        plot_graph(x_dict, y_dict, f"AVERAGE: {m_info['title']} ({len(run_numbers)} Runs)", m_info['ylabel'], filename)
+
+    # CPU-vs-FPS overlay (averaged) — one chart per flavor so the dual lines
+    # don't compete with two other flavor pairs on the same axes.
+    avg_overlays = 0
+    for flavor in flavors:
+        if flavor not in time_grids: continue
+        xd  = {flavor: time_grids[flavor]}
+        cd  = {flavor: avg_data[flavor].get('c')}         if 'c'         in avg_data.get(flavor, {}) else {}
+        ind = {flavor: avg_data[flavor].get('inner_fps')} if 'inner_fps' in avg_data.get(flavor, {}) else {}
+        otd = {flavor: avg_data[flavor].get('outer_fps')} if 'outer_fps' in avg_data.get(flavor, {}) else {}
+        plot_cpu_vs_fps(xd, cd, ind,
+                        f"AVERAGE [{flavor.upper()}]: CPU vs Sim FPS ({len(run_numbers)} Runs)",
+                        f"{OUTPUT_DIR}/averages/Avg_{flavor.upper()}_CPU_vs_Sim_FPS.svg", fps_label='Sim FPS')
+        plot_cpu_vs_fps(xd, cd, otd,
+                        f"AVERAGE [{flavor.upper()}]: CPU vs Update FPS ({len(run_numbers)} Runs)",
+                        f"{OUTPUT_DIR}/averages/Avg_{flavor.upper()}_CPU_vs_Update_FPS.svg", fps_label='Update FPS')
+        avg_overlays += 2
+
+    print(f"[+] Generated {len(METRICS) + avg_overlays} Average Graphs.")
 
     # ---------------------------------------------------------
     # 2. GENERATE INDIVIDUAL RUN COMPARISONS (40 Graphs)
@@ -160,18 +242,33 @@ def main():
         for metric, m_info in METRICS.items():
             x_dict = {}
             y_dict = {}
-            
+
             for flavor in flavors:
                 if run_num in data[flavor]:
                     x_dict[flavor] = data[flavor][run_num]['t']
                     y_dict[flavor] = data[flavor][run_num][metric]
-            
+
             filename = f"{OUTPUT_DIR}/individual/Run_{run_num}_{m_info['title'].replace(' ', '_')}.svg"
             plot_graph(x_dict, y_dict, f"RUN {run_num}: {m_info['title']} Comparison", m_info['ylabel'], filename)
             count += 1
-            
+
+        # CPU-vs-FPS overlay per run — one chart per flavor (readability).
+        for flavor in flavors:
+            if run_num not in data[flavor]: continue
+            xd  = {flavor: data[flavor][run_num]['t']}
+            cd  = {flavor: data[flavor][run_num].get('c')}
+            ind = {flavor: data[flavor][run_num].get('inner_fps')}
+            otd = {flavor: data[flavor][run_num].get('outer_fps')}
+            plot_cpu_vs_fps(xd, cd, ind,
+                            f"RUN {run_num} [{flavor.upper()}]: CPU vs Sim FPS",
+                            f"{OUTPUT_DIR}/individual/Run_{run_num}_{flavor.upper()}_CPU_vs_Sim_FPS.svg", fps_label='Sim FPS')
+            plot_cpu_vs_fps(xd, cd, otd,
+                            f"RUN {run_num} [{flavor.upper()}]: CPU vs Update FPS",
+                            f"{OUTPUT_DIR}/individual/Run_{run_num}_{flavor.upper()}_CPU_vs_Update_FPS.svg", fps_label='Update FPS')
+            count += 2
+
     print(f"[+] Generated {count} Individual Run Graphs.")
-    print(f"\n[*] Complete! All {count + 4} graphs saved to the '{OUTPUT_DIR}/' folder.")
+    print(f"\n[*] Complete! All {count + len(METRICS) + avg_overlays} graphs saved to the '{OUTPUT_DIR}/' folder.")
 
 if __name__ == "__main__":
     main()

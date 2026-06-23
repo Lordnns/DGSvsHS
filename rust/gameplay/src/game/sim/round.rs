@@ -137,15 +137,14 @@ fn start_wave(round: &mut RoundState) {
     round.spawn_accumulator = 0.0;
 }
 
-/// `round(BaseEnemiesPerRound × EnemyScalingPerRound^(r-1))`, capped at MaxEnemies.
+/// `round(BaseEnemiesPerRound × EnemyScalingPerRound^(r-1))`.
 /// Uses round-half-to-even to match C# `Mathf.RoundToInt` / `math.round`.
 pub fn target_enemies_for_round(for_round: i32) -> i32 {
     if for_round < 1 {
         return 0;
     }
     let scaled = BASE_ENEMIES_PER_ROUND as f32 * ENEMY_SCALING_PER_ROUND.powf((for_round - 1) as f32);
-    let t = scaled.round_ties_even() as i32;
-    t.min(MAX_ENEMIES as i32)
+    scaled.round_ties_even() as i32
 }
 
 fn tick_wave(
