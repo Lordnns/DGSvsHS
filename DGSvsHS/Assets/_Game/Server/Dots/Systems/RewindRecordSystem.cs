@@ -8,7 +8,6 @@ using DGSvsHS.Gameplay;
 namespace DGSvsHS.Server.Dots
 {
     [UpdateInGroup(typeof(SimulationSystemGroup))]
-    [UpdateAfter(typeof(EnemyIntegrateSystem))]
     public partial struct RewindRecordSystem : ISystem
     {
         public void OnCreate(ref SystemState state)

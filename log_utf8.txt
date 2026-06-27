@@ -1,0 +1,88 @@
+sam@DESKTOP-O7NN5JS:/mnt/b/DGSvsHS/test_harness$ ROOT="/mnt/b/DGSvsHS/Unreal/UnrealvsHS/Source/ThirdParty/MsQuic"
+  TMP="$(mktemp -d)"
+  mkdir -p "$ROOT/include" "$ROOT/lib/Win64" "$ROOT/lib/Linux"
+
+  VER=$(curl -s https://api.github.com/repos/microsoft/msquic/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed
+  's/^v//')
+  echo "msquic version: $VER"
+
+  # Windows
+  curl -L -o "$TMP/win.zip"
+  "https://github.com/microsoft/msquic/releases/download/v$VER/msquic_windows_x64_Release_schannel.zip"
+  unzip -q "$TMP/win.zip" -d "$TMP/win"
+  find "$TMP/win" -name 'msquic.dll' -exec cp {} "$ROOT/lib/Win64/msquic.dll" \;
+  find "$TMP/win" -name 'msquic.lib' -exec cp {} "$ROOT/lib/Win64/msquic.lib" \;
+  cp -r "$TMP/win/include/." "$ROOT/include/"
+
+  # Linux
+  curl -L -o "$TMP/lin.zip"
+  "https://github.com/microsoft/msquic/releases/download/v$VER/msquic_linux_x64_Release_openssl.zip"
+  unzip -q "$TMP/lin.zip" -d "$TMP/lin"
+  SO=$(find "$TMP/lin" -name 'libmsquic.so.*' -not -name '*.debug' | sort -r | head -1)
+  cp "$SO" "$ROOT/lib/Linux/libmsquic.so.2"
+
+  rm -rf "$TMP"
+  echo ""
+  echo "Files placed:"
+  find "$ROOT" -type f -printf "%p  %s bytes\n" | sort
+Usage: sed [OPTION]... {script-only-if-no-other-script} [input-file]...
+
+  -n, --quiet, --silent
+                 suppress automatic printing of pattern space
+      --debug
+                 annotate program execution
+  -e script, --expression=script
+                 add the script to the commands to be executed
+  -f script-file, --file=script-file
+                 add the contents of script-file to the commands to be executed
+  --follow-symlinks
+                 follow symlinks when processing in place
+  -i[SUFFIX], --in-place[=SUFFIX]
+                 edit files in place (makes backup if SUFFIX supplied)
+  -l N, --line-length=N
+                 specify the desired line-wrap length for the `l' command
+  --posix
+                 disable all GNU extensions.
+  -E, -r, --regexp-extended
+                 use extended regular expressions in the script
+                 (for portability use POSIX -E).
+  -s, --separate
+                 consider files as separate rather than as a single,
+                 continuous long stream.
+      --sandbox
+                 operate in sandbox mode (disable e/r/w commands).
+  -u, --unbuffered
+                 load minimal amounts of data from the input files and flush
+                 the output buffers more often
+  -z, --null-data
+                 separate lines by NUL characters
+      --help     display this help and exit
+      --version  output version information and exit
+
+If no -e, --expression, -f, or --file option is given, then the first
+non-option argument is taken as the sed script to interpret.  All
+remaining arguments are names of input files; if no input files are
+specified, then the standard input is read.
+
+GNU sed home page: <https://www.gnu.org/software/sed/>.
+General help using GNU software: <https://www.gnu.org/gethelp/>.
+-bash: s/^v//: No such file or directory
+msquic version: 
+curl: (2) no URL specified
+curl: try 'curl --help' or 'curl --manual' for more information
+-bash: https://github.com/microsoft/msquic/releases/download/v/msquic_windows_x64_Release_schannel.zip: No such file or directory
+unzip:  cannot find or open /tmp/tmp.9rRIW3k2qk/win.zip, /tmp/tmp.9rRIW3k2qk/win.zip.zip or /tmp/tmp.9rRIW3k2qk/win.zip.ZIP.
+find: ‘/tmp/tmp.9rRIW3k2qk/win’: No such file or directory
+find: ‘/tmp/tmp.9rRIW3k2qk/win’: No such file or directory
+cp: cannot stat '/tmp/tmp.9rRIW3k2qk/win/include/.': No such file or directory
+curl: (2) no URL specified
+curl: try 'curl --help' or 'curl --manual' for more information
+-bash: https://github.com/microsoft/msquic/releases/download/v/msquic_linux_x64_Release_openssl.zip: No such file or directory
+unzip:  cannot find or open /tmp/tmp.9rRIW3k2qk/lin.zip, /tmp/tmp.9rRIW3k2qk/lin.zip.zip or /tmp/tmp.9rRIW3k2qk/lin.zip.ZIP.
+find: ‘/tmp/tmp.9rRIW3k2qk/lin’: No such file or directory
+cp: cannot stat '': No such file or directory
+
+Files placed:
+/mnt/b/DGSvsHS/Unreal/UnrealvsHS/Source/ThirdParty/MsQuic/README.md  1661 bytes
+/mnt/b/DGSvsHS/Unreal/UnrealvsHS/Source/ThirdParty/MsQuic/UvHSMsQuic.Build.cs  1894 bytes
+sam@DESKTOP-O7NN5JS:/mnt/b/DGSvsHS/test_harness$ 

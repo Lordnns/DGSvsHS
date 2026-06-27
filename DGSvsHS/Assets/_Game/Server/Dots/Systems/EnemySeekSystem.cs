@@ -3,7 +3,9 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
+using Unity.Physics;
 using DGSvsHS.Gameplay;
+using Unity.Physics.Extensions;
 
 namespace DGSvsHS.Server.Dots
 {
@@ -31,7 +33,7 @@ namespace DGSvsHS.Server.Dots
             new SeekJob
             {
                 PlayerTargets = playerTargets.AsArray(),
-                EnemySpeed = Constants.EnemySpeed,
+                ImpulseMagnitude = Constants.EnemyDriveForce * Constants.SimDt,
             }.ScheduleParallel();
 
             state.Dependency = playerTargets.Dispose(state.Dependency);
@@ -42,12 +44,12 @@ namespace DGSvsHS.Server.Dots
         private partial struct SeekJob : IJobEntity
         {
             [ReadOnly] public NativeArray<float2> PlayerTargets;
-            public float EnemySpeed;
+            public float ImpulseMagnitude;
 
-            public void Execute(in Position2D pos, ref Velocity2D vel)
+            public void Execute(in Position2D pos, in PhysicsMass mass, ref PhysicsVelocity vel)
             {
-                if (PlayerTargets.Length == 0) { vel.Value = float2.zero; return; }
-                
+                if (PlayerTargets.Length == 0) return;
+
                 float bestSq = float.MaxValue;
                 float2 best = PlayerTargets[0];
                 for (int i = 0; i < PlayerTargets.Length; i++)
@@ -57,12 +59,12 @@ namespace DGSvsHS.Server.Dots
                     if (sq < bestSq) { bestSq = sq; best = PlayerTargets[i]; }
                 }
 
-                float2 dir = best - pos.Value;
                 float len = math.sqrt(bestSq);
-                if (len > 0.0001f) dir /= len;
-                else dir = float2.zero;
+                if (len <= 0.0001f) return;
+                float2 dir = (best - pos.Value) / len;
 
-                vel.Value = dir * EnemySpeed;
+                float3 impulse = new float3(dir.x * ImpulseMagnitude, dir.y * ImpulseMagnitude, 0f);
+                vel.ApplyLinearImpulse(in mass, impulse);
             }
         }
     }

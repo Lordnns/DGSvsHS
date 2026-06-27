@@ -22,8 +22,8 @@ METRICS = {
     'inner_fps': {'title': 'Sim FPS (Inner)', 'ylabel': 'Frames per Second', 'scale': 1.0},
     'outer_fps': {'title': 'Update FPS (Outer)', 'ylabel': 'Frames per Second', 'scale': 1.0},
 }
-FLAVOR_COLORS     = {'dgs': '#1f77b4', 'arch': '#ff7f0e', 'bevy': '#2ca02c'} # Blue,    Orange,    Green       — CPU / single-metric plots
-FLAVOR_FPS_COLORS = {'dgs': '#0d3b66', 'arch': '#a04000', 'bevy': '#145214'} # Navy,    BurntOrng, ForestGrn   — FPS line on CPU-vs-FPS overlays (same family, darker)
+FLAVOR_COLORS     = {'dgs': '#1f77b4', 'arch': '#ff7f0e', 'bevy': '#2ca02c', 'unreal': '#d62728'} # Blue,    Orange,    Green,   Red       — CPU / single-metric plots
+FLAVOR_FPS_COLORS = {'dgs': '#0d3b66', 'arch': '#a04000', 'bevy': '#145214', 'unreal': '#7a1212'} # Navy,    BurntOrng, ForestGrn, Maroon  — FPS line on CPU-vs-FPS overlays (same family, darker)
 # ---------------------
 
 def parse_files():
@@ -38,7 +38,7 @@ def parse_files():
         print(f"[!] Directory '{RESULTS_DIR}' not found.")
         return None, None
 
-    file_pattern = re.compile(r'(?i)(dgs|arch|bevy).*?_(\d+)\.jsonl$')
+    file_pattern = re.compile(r'(?i)(dgs|arch|bevy|unreal).*?_(\d+)\.jsonl$')
 
     for filename in os.listdir(RESULTS_DIR):
         match = file_pattern.match(filename)

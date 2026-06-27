@@ -9,6 +9,8 @@
         "Unity.Collections",
         "Unity.Burst",
         "Unity.Mathematics",
+        "Unity.Transforms",
+        "Unity.Physics",
         "DGSvsHS.Server.BareBone"
     ],
     "includePlatforms": [],

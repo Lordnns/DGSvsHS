@@ -3,10 +3,14 @@ using System;
 using System.Diagnostics;
 using Unity.Entities;
 using Unity.Mathematics;
+using Unity.Physics;
+using Unity.Physics.Systems;
+using Unity.Transforms;
 using DGSvsHS.Gameplay;
 using DGSvsHS.Net;
 using DGSvsHS.Net.Ngo;
 using DGSvsHS.Server.Dots;
+using Unity.Collections;
 using UnityEngine;
 using Debug = UnityEngine.Debug;
 
@@ -55,19 +59,17 @@ namespace DGSvsHS.Server
         private readonly Snapshot _snapshotScratch = new Snapshot();
 
         private float _tickAccumulator;
+        private double _simElapsedTime;
 
-        // Stress telemetry
         private readonly Stopwatch _tickStopwatch = new Stopwatch();
         private double _heartbeatTickMsSum;
         private int _heartbeatTickCount;
         private float _heartbeatLastWallTime;
         private Process _selfProcess;
 
-        // Transition detection — round/phase changes.
         private RoundPhase _prevPhase = RoundPhase.PreGame;
         private int _prevRound = -1;
 
-        // 20 Hz stats writer (50 ms cadence) — recorder grabs latest line via `qm terminal`.
         private const float StatsIntervalSec = 0.05f;
         private float _statsWindowStartTime;
         private int _statsOuterFrames;
@@ -86,12 +88,6 @@ namespace DGSvsHS.Server
         private void Awake()
         {
             Application.runInBackground = true;
-            // Outer Update at 125 Hz (8 ms) = exact 2:1 ratio against the
-            // 62.5 Hz sim (16 ms). Network polling and Update overhead are
-            // matched across all three servers (DGS/Arch/Bevy) so the per-
-            // Update-callback cost cancels out in the comparison instead of
-            // being a per-server confound. Sim still fires deterministically
-            // every other Update via the accumulator in DriveSim().
             Application.targetFrameRate = 125;
             QualitySettings.vSyncCount = 0;
 
@@ -99,8 +95,6 @@ namespace DGSvsHS.Server
             _selfProcess = Process.GetCurrentProcess();
             _heartbeatLastWallTime = Time.unscaledTime;
 
-            // Create the DOTS World with our systems manually — avoids dragging Unity's default
-            // bootstrap systems into a headless server build.
             _simWorld = new World("DGSvsHS.SimWorld");
             _simGroup = _simWorld.GetOrCreateSystemManaged<SimulationSystemGroup>();
 
@@ -110,12 +104,79 @@ namespace DGSvsHS.Server
             _rewindResolveSystem = _simWorld.GetOrCreateSystemManaged<RewindResolveSystem>();
             _simGroup.AddSystemToUpdateList(_rewindResolveSystem);
             AddSystem<EnemySeekSystem>();
-            AddSystem<EnemyIntegrateSystem>();
+            var fixedStep = _simWorld.GetOrCreateSystemManaged<Unity.Entities.FixedStepSimulationSystemGroup>();
+            _simGroup.AddSystemToUpdateList(fixedStep);
+
+            var depTypes = new System.Collections.Generic.List<System.Type>();
+            foreach (var t in DefaultWorldInitialization.GetAllSystems(WorldSystemFilterFlags.Default))
+            {
+                if (t.Namespace != null &&
+                    (t.Namespace.StartsWith("Unity.Physics") || t.Namespace.StartsWith("Unity.Transforms")))
+                {
+                    depTypes.Add(t);
+                }
+            }
+            DefaultWorldInitialization.AddSystemsToRootLevelSystemGroups(_simWorld, depTypes);
+
+            {
+                var stepEntity = _simWorld.EntityManager.CreateEntity(typeof(Unity.Physics.PhysicsStep), typeof(Unity.Physics.PhysicsWorldIndex));
+                _simWorld.EntityManager.SetName(stepEntity, "PhysicsStep");
+                _simWorld.EntityManager.SetComponentData(stepEntity, new Unity.Physics.PhysicsStep
+                {
+                    SimulationType = Unity.Physics.SimulationType.UnityPhysics,
+                    Gravity = float3.zero,
+                    SolverIterationCount = Unity.Physics.PhysicsStep.Default.SolverIterationCount,
+                    SolverStabilizationHeuristicSettings = Unity.Physics.PhysicsStep.Default.SolverStabilizationHeuristicSettings,
+                    MultiThreaded = 1,
+                    SynchronizeCollisionWorld = 1,
+                });
+            }
+
+            {
+                var fs = _simWorld.GetExistingSystemManaged<FixedStepSimulationSystemGroup>();
+                if (fs != null)
+                {
+                    fs.Timestep = Constants.SimDt;
+                    Debug.Log($"[Diag] FixedStep.Timestep = {fs.Timestep}");
+
+                    var syncIn  = _simWorld.CreateSystem<SyncPos2DToLocalTransformSystem>();
+                    var syncOut = _simWorld.CreateSystem<SyncPhysicsToPos2DSystem>();
+                    fs.AddSystemToUpdateList(syncIn);
+                    fs.AddSystemToUpdateList(syncOut);
+                    fs.SortSystems();
+                }
+                else
+                {
+                    Debug.LogWarning("[Diag] FixedStepSimulationSystemGroup not found");
+                }
+            }
+
             AddSystem<PlayerEnemyContactSystem>();
             AddSystem<RewindRecordSystem>();
             _snapshotCaptureSystem = _simWorld.GetOrCreateSystemManaged<SnapshotCaptureSystem>();
             _simGroup.AddSystemToUpdateList(_snapshotCaptureSystem);
             _simGroup.SortSystems();
+
+            ScriptBehaviourUpdateOrder.RemoveWorldFromCurrentPlayerLoop(_simWorld);
+            Debug.Log("[Diag] called RemoveWorldFromCurrentPlayerLoop — DriveSim should be the sole driver");
+
+            // ----- DIAGNOSTIC: confirm key groups + systems exist -----
+            {
+                var defaultHandle = default(SystemHandle);
+                var pGroup = _simWorld.GetExistingSystemManaged<PhysicsSystemGroup>();
+                var fGroup = _simWorld.GetExistingSystemManaged<FixedStepSimulationSystemGroup>();
+                var tGroup = _simWorld.GetExistingSystemManaged<TransformSystemGroup>();
+                var seek    = _simWorld.GetExistingSystem<EnemySeekSystem>();
+                var syncIn  = _simWorld.GetExistingSystem<SyncPos2DToLocalTransformSystem>();
+                var syncOut = _simWorld.GetExistingSystem<SyncPhysicsToPos2DSystem>();
+                Debug.Log(
+                    $"[Diag] PhysicsGroup={(pGroup != null ? "OK" : "NULL")} " +
+                    $"FixedStepGroup={(fGroup != null ? "OK" : "NULL")} " +
+                    $"TransformGroup={(tGroup != null ? "OK" : "NULL")} " +
+                    $"EnemySeek={(seek.Equals(defaultHandle) ? "NULL" : "OK")} " +
+                    $"SyncIn={(syncIn.Equals(defaultHandle) ? "NULL" : "OK")} " +
+                    $"SyncOut={(syncOut.Equals(defaultHandle) ? "NULL" : "OK")}");
+            }
 
             // Initial world state: globals + RNG seed.
             SimBootstrap.CreateOrResetGlobals(_simWorld.EntityManager, Seed);
@@ -242,6 +303,9 @@ namespace DGSvsHS.Server
                 PushPerPlayerRtt();
                 _snapshotCaptureSystem.Target = _snapshotScratch;
 
+                _simElapsedTime += Constants.SimDt;
+                _simWorld.SetTime(new Unity.Core.TimeData(_simElapsedTime, Constants.SimDt));
+
                 _tickStopwatch.Restart();
                 _simGroup.Update();
                 _tickStopwatch.Stop();
@@ -270,7 +334,6 @@ namespace DGSvsHS.Server
 
         private void DoReset()
         {
-            // Wipe enemies, reset round state to PreGame, reseed RNG.
             SimBootstrap.CreateOrResetGlobals(_simWorld.EntityManager, Seed);
             SimBootstrap.DestroyAllEnemies(_simWorld.EntityManager);
             SetGodMode(GodMode);
@@ -291,25 +354,35 @@ namespace DGSvsHS.Server
 
         private void OnClientConnected(byte playerId)
         {
-            // Spawn a Player entity on a circle inside the arena.
             float angle = (playerId / (float)Constants.MaxPlayers) * math.PI * 2f;
             var pos = new float2(math.cos(angle), math.sin(angle)) * (Constants.ArenaRadius * 0.3f);
 
             var em = _simWorld.EntityManager;
+
+            var collider = PhysicsColliders.Player();
+            var pmass = PhysicsMass.CreateKinematic(MassProperties.UnitSphere);
+
             var e = em.CreateEntity(
                 typeof(PlayerTag), typeof(PlayerSlot), typeof(Position2D), typeof(Aim2D),
-                typeof(FireCooldown), typeof(DisableTimer), typeof(Alive));
+                typeof(FireCooldown), typeof(DisableTimer), typeof(Alive),
+                typeof(LocalTransform), typeof(LocalToWorld), typeof(PhysicsCollider), typeof(PhysicsVelocity),
+                typeof(PhysicsMass), typeof(PhysicsDamping), typeof(PhysicsGravityFactor), typeof(PhysicsWorldIndex));
             em.SetComponentData(e, new PlayerSlot { Value = playerId });
             em.SetComponentData(e, new Position2D { Value = pos });
             em.SetComponentData(e, new Aim2D { Value = new float2(1f, 0f) });
             em.SetComponentData(e, new FireCooldown { Seconds = 0f });
             em.SetComponentData(e, new DisableTimer { Seconds = 0f });
             em.SetComponentData(e, Alive.From(true));
+            em.SetComponentData(e, LocalTransform.FromPosition(new float3(pos.x, pos.y, 0f)));
+            em.SetComponentData(e, new PhysicsCollider { Value = collider });
+            em.SetComponentData(e, new PhysicsVelocity { Linear = float3.zero, Angular = float3.zero });
+            em.SetComponentData(e, pmass);
+            em.SetComponentData(e, new PhysicsDamping { Linear = Constants.PlayerLinearDamping, Angular = 0f });
+            em.SetComponentData(e, new PhysicsGravityFactor { Value = 0f });
             em.SetName(e, $"Player {playerId}");
 
             Debug.Log($"[Server] Player {playerId} connected, spawned at ({pos.x:F2}, {pos.y:F2})");
 
-            // Was Idle → first client triggers Running, and kicks off round 1.
             if (_state == ServerLifecycle.Idle)
             {
                 if (AutoStartMatch) KickoffMatch();
@@ -337,7 +410,6 @@ namespace DGSvsHS.Server
 
             Debug.Log($"[Server] Player {playerId} disconnected: {reason}");
 
-            // Last client out → Resetting (next-frame wipe + back to Idle).
             if (_playerTagQuery.CalculateEntityCount() == 0 && _state == ServerLifecycle.Running)
             {
                 TransitionTo(ServerLifecycle.Resetting, "last client disconnected");
@@ -425,9 +497,6 @@ namespace DGSvsHS.Server
         }
 
         // ---------- 20 Hz stats file ----------
-        // Overwrites /tmp/stats.log with a single JSON line. The test-harness
-        // recorder grabs it via `qm terminal` from the Proxmox host. Only
-        // emitted on Linux (the trial target); other platforms no-op silently.
         private void WriteStatsFileIfDue()
         {
             _statsOuterFrames++;

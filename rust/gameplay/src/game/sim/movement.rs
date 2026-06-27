@@ -2,6 +2,7 @@
 // systems PlayerInputSystem, EnemySeekSystem, EnemyIntegrateSystem,
 // PlayerEnemyContactSystem (WireFormat.md §8.2 steps 3, 5, 6, 7).
 
+use avian2d::prelude::*;
 use bevy::prelude::*;
 
 use super::components::*;
@@ -10,20 +11,11 @@ use crate::game::spatial::{Pos2D, Vel2D};
 
 const AIM_EPS_SQ: f32 = 0.0001;
 
-/// Step 1: advance the world tick and clear the per-tick fire-event accumulator.
 pub fn tick_advance(mut clock: ResMut<WorldClock>, mut fires: ResMut<FireEvents>) {
     clock.0 += 1;
     fires.0.clear();
 }
 
-/// Step 3: apply the latest input per player (move/aim/cooldown/disable decay)
-/// and queue fire commands for the rewind resolver.
-///
-/// Parity note: the reference server queues a fire for every Fire input of an
-/// *alive* player and does NOT gate on cooldown or disable — fire cadence is
-/// enforced client-side. We mirror that exactly (even though the gameplay doc
-/// says fire is blocked while disabled). Fire origin is the player's position
-/// at the START of the tick (before this tick's movement is applied).
 pub fn player_input(
     mut inbox: ResMut<InputInbox>,
     mut pending_fires: ResMut<PendingFires>,
@@ -40,7 +32,6 @@ pub fn player_input(
         With<Player>,
     >,
 ) {
-    // Latest input per slot (highest tick wins).
     let mut latest: [Option<crate::game::types::InputCmd>; MAX_PLAYERS] = [None; MAX_PLAYERS];
     for (slot, cmd) in inbox.0.iter() {
         let s = *slot as usize;
@@ -52,7 +43,6 @@ pub fn player_input(
         }
     }
 
-    // Pre-movement snapshot per slot for fire origins.
     let mut snap: [Option<(Vec2, Vec2, bool)>; MAX_PLAYERS] = [None; MAX_PLAYERS];
     for (slot, pos, aim, _cd, _dt, alive) in players.iter() {
         let s = slot.0 as usize;
@@ -61,7 +51,6 @@ pub fn player_input(
         }
     }
 
-    // Queue fires: iterate every buffered Fire input (not just the latest).
     for (slot, cmd) in inbox.0.iter() {
         if !cmd.fire() {
             continue;
@@ -90,7 +79,6 @@ pub fn player_input(
         });
     }
 
-    // Apply movement / aim / timers.
     let max_r = ARENA_RADIUS - PLAYER_RADIUS;
     for (slot, mut pos, mut aim, mut cd, mut dt, alive) in players.iter_mut() {
         let s = slot.0 as usize;
@@ -129,10 +117,9 @@ pub fn player_input(
     inbox.0.clear();
 }
 
-/// Step 5: each enemy heads toward the nearest alive, non-disabled player.
 pub fn enemy_seek(
     players: Query<(&PlayerSlot, &Pos2D, &Alive, &DisableTimer), With<Player>>,
-    mut enemies: Query<(&Pos2D, &mut Vel2D), With<Enemy>>,
+    mut enemies: Query<(&Pos2D, Forces), With<Enemy>>,
 ) {
     // Build target list in slot order so the (vanishingly rare) exact-distance
     // tie-break is deterministic across runs/builds.
@@ -144,12 +131,10 @@ pub fn enemy_seek(
     targets.sort_by_key(|(slot, _)| *slot);
     let targets: Vec<Vec2> = targets.into_iter().map(|(_, p)| p).collect();
 
-    for (pos, mut vel) in enemies.iter_mut() {
-        if targets.is_empty() {
-            vel.x = 0.0;
-            vel.y = 0.0;
-            continue;
-        }
+    if targets.is_empty() {
+        return;
+    }
+    for (pos, mut forces) in enemies.iter_mut() {
         let p = pos_vec(pos);
         let mut best = targets[0];
         let mut best_sq = f32::MAX;
@@ -165,24 +150,44 @@ pub fn enemy_seek(
         if len > 0.0001 {
             dir /= len;
         } else {
-            dir = Vec2::ZERO;
+            continue;
         }
-        let v = dir * ENEMY_SPEED;
-        vel.x = v.x;
-        vel.y = v.y;
+        forces.apply_force(dir * ENEMY_DRIVE_FORCE);
     }
 }
 
-/// Step 6: integrate enemy positions.
-pub fn enemy_integrate(mut enemies: Query<(&mut Pos2D, &Vel2D), With<Enemy>>) {
-    for (mut pos, vel) in enemies.iter_mut() {
-        pos.x += vel.x * SIM_DT;
-        pos.y += vel.y * SIM_DT;
+pub fn sync_pos2d_to_physics(
+    mut players: Query<(&Pos2D, &mut Position), With<Player>>,
+) {
+    for (pos2d, mut position) in players.iter_mut() {
+        position.0.x = pos2d.x;
+        position.0.y = pos2d.y;
     }
 }
 
-/// Step 7: alive, non-disabled player touching any enemy → disabled for
-/// DisableDurationSec. Skipped entirely in God Mode.
+pub fn sync_physics_to_pos2d(
+    mut q: Query<(&mut Pos2D, &mut Vel2D, &mut Position, &mut LinearVelocity, Has<Player>)>,
+) {
+    let enemy_max = ARENA_RADIUS - ENEMY_RADIUS;
+    let player_max = ARENA_RADIUS - PLAYER_RADIUS;
+    for (mut pos2d, mut vel2d, mut position, mut lv, is_player) in q.iter_mut() {
+        let max_r = if is_player { player_max } else { enemy_max };
+        let r = position.0.length();
+        if r > max_r {
+            position.0 *= max_r / r;
+        }
+        pos2d.x = position.0.x;
+        pos2d.y = position.0.y;
+        vel2d.x = lv.0.x;
+        vel2d.y = lv.0.y;
+        // Also reset kinematic player velocity each tick (input drives position
+        // directly; we don't want residual velocity bleeding into next tick).
+        if is_player {
+            lv.0 = Vec2::ZERO;
+        }
+    }
+}
+
 pub fn player_enemy_contact(
     god: Res<GodMode>,
     enemies: Query<&Pos2D, With<Enemy>>,

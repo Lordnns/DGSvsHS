@@ -3,6 +3,8 @@ using Unity.Burst;
 using Unity.Collections;
 using Unity.Entities;
 using Unity.Mathematics;
+using Unity.Physics;
+using Unity.Transforms;
 using DGSvsHS.Gameplay;
 
 namespace DGSvsHS.Server.Dots
@@ -124,11 +126,27 @@ namespace DGSvsHS.Server.Dots
             float angle = rng.NextRange(0f, math.PI * 2f);
             float r = Constants.ArenaRadius - Constants.EnemyRadius - 0.1f;
             float2 pos = new float2(math.cos(angle) * r, math.sin(angle) * r);
-            
-            var e = em.CreateEntity(typeof(EnemyTag), typeof(EnemyId), typeof(Position2D), typeof(Velocity2D));
+
+            var collider = PhysicsColliders.Enemy();
+
+            var massProps = MassProperties.UnitSphere;
+            var pmass = PhysicsMass.CreateDynamic(massProps, Constants.EnemyMass);
+
+            pmass.InverseInertia = float3.zero;
+
+            var e = em.CreateEntity(
+                typeof(EnemyTag), typeof(EnemyId), typeof(Position2D), typeof(Velocity2D),
+                typeof(LocalTransform), typeof(LocalToWorld), typeof(PhysicsCollider), typeof(PhysicsVelocity),
+                typeof(PhysicsMass), typeof(PhysicsDamping), typeof(PhysicsGravityFactor), typeof(PhysicsWorldIndex));
             em.SetComponentData(e, new EnemyId { Value = nextId++ });
             em.SetComponentData(e, new Position2D { Value = pos });
             em.SetComponentData(e, new Velocity2D { Value = float2.zero });
+            em.SetComponentData(e, LocalTransform.FromPosition(new float3(pos.x, pos.y, 0f)));
+            em.SetComponentData(e, new PhysicsCollider { Value = collider });
+            em.SetComponentData(e, new PhysicsVelocity { Linear = float3.zero, Angular = float3.zero });
+            em.SetComponentData(e, pmass);
+            em.SetComponentData(e, new PhysicsDamping { Linear = Constants.EnemyLinearDamping, Angular = 0f });
+            em.SetComponentData(e, new PhysicsGravityFactor { Value = 0f });
         }
 
         private bool AllConnectedPlayersDisabled(ref SystemState state)
@@ -144,7 +162,6 @@ namespace DGSvsHS.Server.Dots
             return total > 0 && disabled == total;
         }
 
-        ///Team wipe — destroy all enemies, clear spawn state, queue a fresh round 1 via InterRound.
         private void ResetToRoundOne(EntityManager em, ref SystemState state, ref RoundState round)
         {
             round.Round = 0;

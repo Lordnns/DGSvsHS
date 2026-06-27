@@ -10,8 +10,10 @@
 
 use std::f32::consts::PI;
 
+use avian2d::prelude::*;
 use bevy::prelude::*;
 
+use crate::game::constants::{PLAYER_LINEAR_DAMPING, PLAYER_RADIUS};
 use crate::game::sim::components::{
     Aim2D, Alive, DisableTimer, Enemy, FireCooldown, FireEvents, Lifecycle, NextEnemyId,
     PendingFires, Player, PlayerRtt, PlayerSlot, RoundState, Seed, SimRng, WorldClock,
@@ -40,6 +42,15 @@ pub fn spawn_player(commands: &mut Commands, slot: u8) {
         FireCooldown(0.0),
         DisableTimer(0.0),
         Alive(true),
+        // Kinematic body — player position is driven directly by client input
+        // (see movement::player_input) but the collider still participates in
+        // physics so enemy bodies push against it during collision resolution.
+        RigidBody::Kinematic,
+        Collider::circle(PLAYER_RADIUS),
+        Position(pos),
+        LinearVelocity(Vec2::ZERO),
+        LinearDamping(PLAYER_LINEAR_DAMPING),
+        LockedAxes::ROTATION_LOCKED,
     ));
 }
 

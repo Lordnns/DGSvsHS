@@ -14,8 +14,14 @@ Orchestrates an automated benchmark suite:
 Output files are automatically suffixed: results/<case>_1.jsonl, <case>_2.jsonl, etc.
 
 Usage examples:
-    python run_case.py --case dgs_baseline --flavor dgs --vmid 202 --runs 5
-    python run_case.py --case bevy_stress  --flavor bevy --vmid 200 --runs 3 --bots 4 -r
+    python run_case.py --case dgs_baseline    --flavor dgs    --vmid 202 --runs 5
+    python run_case.py --case bevy_stress     --flavor bevy   --vmid 200 --runs 3 --bots 4 -r
+    python run_case.py --case unreal_baseline --flavor unreal --vmid 203 --runs 5
+
+Per-flavor client exe is read from the .env file as CLIENT_EXE_<FLAVOR>
+(e.g. CLIENT_EXE_UNREAL=/path/to/UnrealvsHS.exe). All client builds accept
+the same `--bot-id N` two-arg CLI: the Unreal client parses Unity-style
+long-flag form alongside UE's native `-key=value` form (UvHSClientGameMode.cpp).
 """
 
 import argparse
@@ -48,6 +54,14 @@ def resolve_exe(flavor: str) -> str:
     if not Path(path).is_file():
         sys.exit(f"[!] {key} points at non-existent file: {path}")
     return path
+
+
+# Per-server UDP listen ports (CLAUDE.md §11.1):
+#   DGS    7777  — Unity DOTS server
+#   Arch   7778  — C#/Arch server
+#   Bevy   4433  — Rust/Bevy server
+#   Unreal 7780  — UE/Mass server (init.sh launches with -QuicPort=7780)
+FLAVOR_PORT = {"dgs": 7777, "arch": 7778, "bevy": 4433, "unreal": 7780}
 
 
 def restart_vm(vmid: str, vm_type: str) -> None:
@@ -120,10 +134,16 @@ def stop_recorder(proc: subprocess.Popen, grace_sec: float = 5.0) -> None:
         proc.wait(timeout=2.0)
 
 
-def start_clients(exe: str, bots: int) -> list[subprocess.Popen]:
+def start_clients(exe: str, bots: int, flavor: str, duration_sec: float) -> list[subprocess.Popen]:
+    port = FLAVOR_PORT[flavor]
     procs: list[subprocess.Popen] = []
     for i in range(bots):
-        cmd = [exe, "--bot-id", str(i)]
+        cmd = [
+            exe,
+            "--bot-id",   str(i),
+            "--port",     str(port),
+            "--duration", str(duration_sec),
+        ]
         print(f"[harness] launching client {i}: {' '.join(cmd)}")
         p = subprocess.Popen(cmd)
         procs.append(p)
@@ -132,10 +152,23 @@ def start_clients(exe: str, bots: int) -> list[subprocess.Popen]:
 
 
 def stop_clients(procs: list[subprocess.Popen], grace_sec: float = 5.0) -> None:
+    # UE5 packaged Windows clients launch a top-level bootstrap .exe that
+    # CreateProcess-spawns the real game from Binaries/Win64/<Project>.exe.
+    # Plain proc.terminate() (TerminateProcess) only kills the bootstrap; the
+    # inner game gets orphaned and keeps running. taskkill /F /T walks the
+    # full process tree so the actual game dies too. Unity standalones don't
+    # do this nesting but taskkill /T is harmless on them.
     print(f"[harness] terminating {len(procs)} client(s)…")
     for p in procs:
         try:
-            p.terminate()
+            if WIN:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+            else:
+                p.terminate()
         except Exception:
             pass
     for p in procs:
@@ -167,7 +200,7 @@ def countdown_timer(seconds: float, phase: str) -> None:
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Automated multi-run benchmark orchestrator")
     ap.add_argument("--case", required=True, help="Base name of the run (creates results/<case>_X.jsonl)")
-    ap.add_argument("--flavor", required=True, choices=["dgs", "arch", "bevy"], help="Client/server flavor")
+    ap.add_argument("--flavor", required=True, choices=["dgs", "arch", "bevy", "unreal"], help="Client/server flavor")
 
     # Automation flags
     ap.add_argument("-r", "--restart", action="store_true", help="Restart the Proxmox VM and wait 20s before each run")
@@ -217,7 +250,7 @@ def main() -> int:
                 sys.exit(f"[!] recorder failed to start (rc={recorder.returncode})")
 
             # 3. Launch Clients
-            clients = start_clients(exe, args.bots)
+            clients = start_clients(exe, args.bots, args.flavor, args.duration_sec)
 
             try:
                 # Active Phase

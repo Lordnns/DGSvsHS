@@ -8,6 +8,7 @@
 // round-end count and the "spawn-then-wipe same tick" reset semantics. Direct
 // world mutation reproduces the reference exactly.
 
+use avian2d::prelude::*;
 use bevy::prelude::*;
 use std::f32::consts::TAU;
 
@@ -109,6 +110,14 @@ pub fn round_director(world: &mut World) {
                 EnemyId(id),
                 Pos2D { x, y },
                 Vel2D { x: 0.0, y: 0.0 },
+                RigidBody::Dynamic,
+                Collider::circle(ENEMY_RADIUS),
+                Mass(ENEMY_MASS),
+                Position(Vec2::new(x, y)),
+                LinearVelocity(Vec2::ZERO),
+                LinearDamping(ENEMY_LINEAR_DAMPING),
+                // Skip rotational dynamics — enemies are circles in top-down 2D.
+                LockedAxes::ROTATION_LOCKED,
             ));
         }
     }

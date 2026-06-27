@@ -4,6 +4,7 @@ pub mod network;
 pub mod server;
 
 use std::time::Duration;
+use avian2d::prelude::*;
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin};
 use bevy::log::{LogPlugin, info};
@@ -71,6 +72,8 @@ pub fn launch_server(cfg: ServerConfig) {
             ..Default::default()
         })
         .add_plugins(system_metrics::MicroSystemMetrics)
+        .add_plugins(PhysicsPlugins::new(FixedUpdate))
+        .insert_resource(Gravity(Vec2::ZERO))
         .add_plugins(game::sim::SimPlugin {
             seed: cfg.seed,
             god_mode: cfg.god_mode,

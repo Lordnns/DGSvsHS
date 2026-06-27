@@ -54,10 +54,16 @@ namespace DGSvsHS.Gameplay
         public const int EnemyMaxHp = 1;
         public const int MaxEnemies = 1000000;
 
+        // ---------- Physics (DOTS Physics 3D, XY-plane constrained) ----------
+        public const float EnemyMass = 1f;
+        public const float EnemyLinearDamping = 10f;
+        public const float EnemyDriveForce = EnemySpeed * EnemyLinearDamping; // ≈ 25
+        public const float PlayerLinearDamping = 0f;
+
         // ---------- Rounds ----------
         public const int TotalRounds = 10;
         public const float InterRoundDelaySec = 3f;
-        public const int BaseEnemiesPerRound = 3000;
+        public const int BaseEnemiesPerRound = 700;
         public const float EnemyScalingPerRound = 1.4f;
         public const float RoundSpawnWindowSec = 18f;
 

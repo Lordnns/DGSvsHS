@@ -6,11 +6,15 @@
 // and snapshot (Phase 4) systems slot into their reserved sets without
 // reordering anything.
 
+use avian2d::prelude::PhysicsSystems;
 use bevy::prelude::*;
 use bevy::time::Fixed;
 
 use super::components::*;
-use super::movement::{enemy_integrate, enemy_seek, player_enemy_contact, player_input, tick_advance};
+use super::movement::{
+    enemy_seek, player_enemy_contact, player_input, sync_physics_to_pos2d,
+    sync_pos2d_to_physics, tick_advance,
+};
 use super::rewind::{rewind_record, rewind_resolve, RewindRing};
 use super::round::round_director;
 use super::DeterministicRng;
@@ -21,9 +25,11 @@ pub enum SimSet {
     TickAdvance,
     RoundDirector,
     PlayerInput,
+    SyncToPhysics,
     RewindResolve,
     EnemySeek,
-    EnemyIntegrate,
+    // Avian's PhysicsSet::StepSimulation runs here (configured via .after below).
+    SyncFromPhysics,
     PlayerContact,
     RewindRecord,
     Snapshot,
@@ -66,15 +72,23 @@ impl Plugin for SimPlugin {
                 SimSet::TickAdvance,
                 SimSet::RoundDirector,
                 SimSet::PlayerInput,
+                SimSet::SyncToPhysics,
                 SimSet::RewindResolve,
                 SimSet::EnemySeek,
-                SimSet::EnemyIntegrate,
+                SimSet::SyncFromPhysics,
                 SimSet::PlayerContact,
                 SimSet::RewindRecord,
                 SimSet::Snapshot,
             )
                 .chain()
                 .run_if(sim_running),
+        );
+        
+        app.configure_sets(
+            FixedUpdate,
+            PhysicsSystems::StepSimulation
+                .after(SimSet::EnemySeek)
+                .before(SimSet::SyncFromPhysics),
         );
 
         app.add_systems(
@@ -83,9 +97,10 @@ impl Plugin for SimPlugin {
                 tick_advance.in_set(SimSet::TickAdvance),
                 round_director.in_set(SimSet::RoundDirector),
                 player_input.in_set(SimSet::PlayerInput),
+                sync_pos2d_to_physics.in_set(SimSet::SyncToPhysics),
                 rewind_resolve.in_set(SimSet::RewindResolve),
                 enemy_seek.in_set(SimSet::EnemySeek),
-                enemy_integrate.in_set(SimSet::EnemyIntegrate),
+                sync_physics_to_pos2d.in_set(SimSet::SyncFromPhysics),
                 player_enemy_contact.in_set(SimSet::PlayerContact),
                 rewind_record.in_set(SimSet::RewindRecord),
             ),

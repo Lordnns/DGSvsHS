@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import paramiko
 import os
 import sys
