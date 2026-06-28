@@ -1,0 +1,9 @@
+AllBuilds/**/*.pakgit filter=lfs diff=lfs merge=lfs -text
+lfs filter=lfs diff=lfs merge=lfs -text
+AllBuilds/**/*.dllgit filter=lfs diff=lfs merge=lfs -text
+AllBuilds/**/*.pdbgit filter=lfs diff=lfs merge=lfs -text
+AllBuilds/**/*.so filter=lfs diff=lfs merge=lfs -text
+track filter=lfs diff=lfs merge=lfs -text
+AllBuilds/**/*.exegit filter=lfs diff=lfs merge=lfs -text
+AllBuilds/**/*.app filter=lfs diff=lfs merge=lfs -text
+git filter=lfs diff=lfs merge=lfs -text
