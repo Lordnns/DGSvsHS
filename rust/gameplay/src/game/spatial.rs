@@ -32,27 +32,30 @@ impl Plugin for SpatialPlugin {
     }
 }
 
-#[derive(Resource)]
-pub struct EnemyGrid {
-    /// Row-major: index = cy * cells_per_side + cx
-    cells: Vec<Vec<Entity>>,
-    cells_per_side: i32,
-    half_cells: i32,
-    cell_size: f32,
+/// Uniform-grid geometry: cell math shared by `EnemyGrid` (current-world
+/// entities) and the rewind ring's per-frame buckets (historical positions),
+/// so both index identically. Pure — no entity storage.
+#[derive(Copy, Clone, Debug)]
+pub struct GridGeom {
+    pub cells_per_side: i32,
+    pub half_cells: i32,
+    pub cell_size: f32,
 }
 
-impl EnemyGrid {
-    pub fn new() -> Self {
-        let n = (GRID_HALF_CELLS * 2) as usize;
+impl GridGeom {
+    pub fn from_constants() -> Self {
         Self {
-            cells: (0..n * n).map(|_| Vec::new()).collect(),
             cells_per_side: GRID_HALF_CELLS * 2,
             half_cells: GRID_HALF_CELLS,
             cell_size: GRID_CELL_SIZE,
         }
     }
 
-    fn cell_coords(&self, x: f32, y: f32) -> Option<(i32, i32)> {
+    pub fn cell_count(&self) -> usize {
+        (self.cells_per_side * self.cells_per_side) as usize
+    }
+
+    pub fn cell_coords(&self, x: f32, y: f32) -> Option<(i32, i32)> {
         let cx = (x / self.cell_size).floor() as i32 + self.half_cells;
         let cy = (y / self.cell_size).floor() as i32 + self.half_cells;
         if cx < 0 || cy < 0 || cx >= self.cells_per_side || cy >= self.cells_per_side {
@@ -61,8 +64,51 @@ impl EnemyGrid {
         Some((cx, cy))
     }
 
-    fn cell_idx(&self, cx: i32, cy: i32) -> usize {
+    pub fn cell_idx(&self, cx: i32, cy: i32) -> usize {
         (cy * self.cells_per_side + cx) as usize
+    }
+
+    /// Inclusive cell range `(cxmin, cymin, cxmax, cymax)` for every cell whose
+    /// AABB overlaps the segment A→B expanded by `radius`. `None` if the
+    /// expanded AABB falls entirely outside the grid.
+    pub fn segment_cell_range(
+        &self,
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+        radius: f32,
+    ) -> Option<(i32, i32, i32, i32)> {
+        let half_world = self.half_cells as f32 * self.cell_size;
+        // Clamp the segment AABB into the grid (and shave 1 mm off the upper
+        // bound so floor() doesn't land on the past-the-end cell).
+        let xmin = (ax.min(bx) - radius).max(-half_world);
+        let xmax = (ax.max(bx) + radius).min(half_world - 0.001);
+        let ymin = (ay.min(by) - radius).max(-half_world);
+        let ymax = (ay.max(by) + radius).min(half_world - 0.001);
+        if xmin > xmax || ymin > ymax {
+            return None;
+        }
+        let (cxmin, cymin) = self.cell_coords(xmin, ymin)?;
+        let (cxmax, cymax) = self.cell_coords(xmax, ymax)?;
+        Some((cxmin, cymin, cxmax, cymax))
+    }
+}
+
+#[derive(Resource)]
+pub struct EnemyGrid {
+    /// Row-major: index = cy * cells_per_side + cx
+    cells: Vec<Vec<Entity>>,
+    geom: GridGeom,
+}
+
+impl EnemyGrid {
+    pub fn new() -> Self {
+        let geom = GridGeom::from_constants();
+        Self {
+            cells: (0..geom.cell_count()).map(|_| Vec::new()).collect(),
+            geom,
+        }
     }
 
     pub fn clear(&mut self) {
@@ -72,8 +118,8 @@ impl EnemyGrid {
     }
 
     pub fn insert(&mut self, entity: Entity, pos: Pos2D) {
-        if let Some((cx, cy)) = self.cell_coords(pos.x, pos.y) {
-            let i = self.cell_idx(cx, cy);
+        if let Some((cx, cy)) = self.geom.cell_coords(pos.x, pos.y) {
+            let i = self.geom.cell_idx(cx, cy);
             self.cells[i].push(entity);
         }
     }
@@ -91,25 +137,14 @@ impl EnemyGrid {
         out: &mut Vec<Entity>,
     ) {
         out.clear();
-        let half_world = self.half_cells as f32 * self.cell_size;
-        // Clamp the segment AABB into the grid (and shave 1 mm off the upper
-        // bound so floor() doesn't land on the past-the-end cell).
-        let xmin = (ax.min(bx) - radius).max(-half_world);
-        let xmax = (ax.max(bx) + radius).min(half_world - 0.001);
-        let ymin = (ay.min(by) - radius).max(-half_world);
-        let ymax = (ay.max(by) + radius).min(half_world - 0.001);
-        if xmin > xmax || ymin > ymax {
-            return;
-        }
-        let Some((cxmin, cymin)) = self.cell_coords(xmin, ymin) else {
-            return;
-        };
-        let Some((cxmax, cymax)) = self.cell_coords(xmax, ymax) else {
+        let Some((cxmin, cymin, cxmax, cymax)) =
+            self.geom.segment_cell_range(ax, ay, bx, by, radius)
+        else {
             return;
         };
         for cy in cymin..=cymax {
             for cx in cxmin..=cxmax {
-                let i = self.cell_idx(cx, cy);
+                let i = self.geom.cell_idx(cx, cy);
                 out.extend_from_slice(&self.cells[i]);
             }
         }

@@ -1,22 +1,24 @@
 // Per-recipient ack/staleness/pending-send bookkeeping for delta snapshots.
 // Port of csharp_arch_server/Server/RecipientSnapshotState.cs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::prelude::Resource;
 
 use crate::game::constants::{MAX_DELTA_DEPTH, MAX_PLAYERS};
 
+use super::bitset::IdBitSet;
+
 /// `MaxDeltaDepth * 2` — bounds the per-recipient pending-send list so a
 /// permanently-stalled client can't make the server grow without bound.
 const MAX_PENDING: usize = (MAX_DELTA_DEPTH as usize) * 2;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct PendingEntry {
     tick: u32,
     is_full: bool,
-    included: HashSet<u16>,
-    removed: HashSet<u16>,
+    included: Vec<u16>,
+    removed: Vec<u16>,
 }
 
 #[derive(Default, Debug)]
@@ -26,10 +28,11 @@ pub struct RecipientSnapshotState {
 
     /// Set of enemy IDs the recipient is known to have. Updated when a pending
     /// send is acked.
-    pub confirmed_ids: HashSet<u16>,
+    pub confirmed_ids: IdBitSet,
 
     /// Per-enemy staleness counter, capped at u16::MAX. Reset to 0 when an
-    /// entity is included in a send, incremented on every other send.
+    /// entity is included in a send, incremented on every other send. Keys
+    /// mirror `confirmed_ids`.
     pub ticks_since_last_sent: HashMap<u16, u16>,
 
     /// Set by the transport when an input batch arrives with a higher ack;
@@ -37,7 +40,6 @@ pub struct RecipientSnapshotState {
     pub pending_acked_tick: u32,
 
     pending: Vec<PendingEntry>,
-    keys_scratch: Vec<u16>,
 }
 
 impl RecipientSnapshotState {
@@ -67,7 +69,7 @@ impl RecipientSnapshotState {
         &mut self,
         tick: u32,
         is_full: bool,
-        included: &HashSet<u16>,
+        included: &IdBitSet,
         removed: &[u16],
     ) {
         // Leak cap: drop the oldest entries first.
@@ -75,23 +77,17 @@ impl RecipientSnapshotState {
             self.pending.remove(0);
         }
 
-        let mut inc_copy: HashSet<u16> = HashSet::with_capacity(included.len());
-        inc_copy.extend(included.iter().copied());
-        let mut rem_copy: HashSet<u16> = HashSet::with_capacity(removed.len());
-        rem_copy.extend(removed.iter().copied());
         self.pending.push(PendingEntry {
             tick,
             is_full,
-            included: inc_copy,
-            removed: rem_copy,
+            included: included.iter().collect(),
+            removed: removed.to_vec(),
         });
 
-        // Advance staleness counters. Reusable scratch avoids the per-tick
-        // HashMap key allocation.
-        self.keys_scratch.clear();
-        self.keys_scratch.extend(self.ticks_since_last_sent.keys().copied());
-        for &id in &self.keys_scratch {
-            if included.contains(&id) {
+        // Advance staleness counters. Keys mirror `confirmed_ids`, so iterate
+        // the bitset directly — no key snapshot/allocation needed.
+        for id in self.confirmed_ids.iter() {
+            if included.contains(id) {
                 self.ticks_since_last_sent.insert(id, 0);
             } else if let Some(cur) = self.ticks_since_last_sent.get_mut(&id) {
                 *cur = cur.saturating_add(1);
@@ -121,15 +117,7 @@ impl RecipientSnapshotState {
                 continue;
             }
 
-            let entry = std::mem::replace(
-                &mut self.pending[read_idx],
-                PendingEntry {
-                    tick: 0,
-                    is_full: false,
-                    included: HashSet::new(),
-                    removed: HashSet::new(),
-                },
-            );
+            let entry = std::mem::take(&mut self.pending[read_idx]);
             if entry.is_full {
                 self.confirmed_ids.clear();
                 self.ticks_since_last_sent.clear();
@@ -143,7 +131,7 @@ impl RecipientSnapshotState {
                     self.ticks_since_last_sent.entry(id).or_insert(0);
                 }
                 for id in entry.removed {
-                    self.confirmed_ids.remove(&id);
+                    self.confirmed_ids.remove(id);
                     self.ticks_since_last_sent.remove(&id);
                 }
             }
@@ -157,7 +145,6 @@ impl RecipientSnapshotState {
         self.ticks_since_last_sent.clear();
         self.pending_acked_tick = 0;
         self.pending.clear();
-        self.keys_scratch.clear();
     }
 }
 
@@ -226,8 +213,12 @@ impl RecipientStates {
 mod tests {
     use super::*;
 
-    fn ids(xs: &[u16]) -> HashSet<u16> {
-        xs.iter().copied().collect()
+    fn ids(xs: &[u16]) -> IdBitSet {
+        let mut b = IdBitSet::new();
+        for &x in xs {
+            b.insert(x);
+        }
+        b
     }
 
     #[test]

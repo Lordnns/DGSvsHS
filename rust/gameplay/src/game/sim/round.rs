@@ -52,7 +52,7 @@ pub fn round_director(world: &mut World) {
     let mut next_id = world.resource::<NextEnemyId>().0;
 
     // Decisions accumulated against local copies; applied to the world after.
-    let mut spawns: Vec<(u16, f32, f32)> = Vec::new();
+    let mut spawns: Vec<(u32, f32, f32)> = Vec::new();
     let mut despawn_all = false;
     let mut reenable_players = false;
 
@@ -159,8 +159,8 @@ pub fn target_enemies_for_round(for_round: i32) -> i32 {
 fn tick_wave(
     round: &mut RoundState,
     rng: &mut DeterministicRng,
-    next_id: &mut u16,
-    spawns: &mut Vec<(u16, f32, f32)>,
+    next_id: &mut u32,
+    spawns: &mut Vec<(u32, f32, f32)>,
 ) {
     if round.spawns_remaining <= 0 {
         return;
@@ -173,7 +173,7 @@ fn tick_wave(
     }
 }
 
-fn spawn_one_enemy(rng: &mut DeterministicRng, next_id: &mut u16, spawns: &mut Vec<(u16, f32, f32)>) {
+fn spawn_one_enemy(rng: &mut DeterministicRng, next_id: &mut u32, spawns: &mut Vec<(u32, f32, f32)>) {
     let angle = rng.next_range(0.0, TAU);
     let r = ARENA_RADIUS - ENEMY_RADIUS - 0.1;
     let (s, c) = (angle.sin(), angle.cos());

@@ -14,8 +14,6 @@
 //   6. Encode header + body via the wire codec, emit as a NetMsgOut datagram.
 //   7. Update RecipientSnapshotState with what was actually included.
 
-use std::collections::HashSet;
-
 use bevy::prelude::*;
 
 use crate::game::constants::SNAPSHOT_BYTE_BUDGET;
@@ -27,23 +25,42 @@ use crate::network::codec::{
 };
 use crate::network::{MsgKind, NetMsgOut, PlayerSlots};
 
+use super::bitset::IdBitSet;
 use super::capture::SnapshotScratch;
 use super::history::WorldStateHistory;
 use super::priority::{select_for_delta, select_for_full, ScoredEnemy};
 use super::recipient::RecipientStates;
 
 /// Reusable scratch buffers, owned by a Local<> so we don't allocate per tick.
-#[derive(Default)]
 pub struct BroadcastScratch {
     selected_enemies: Vec<EnemySnap>,
     scored: Vec<ScoredEnemy>,
     changed: Vec<EnemyDeltaEntry>,
     removed: Vec<u16>,
     added: Vec<EnemySnap>,
-    included: HashSet<u16>,
-    current_ids: HashSet<u16>,
-    baseline_index: std::collections::HashMap<u16, usize>,
+    included: IdBitSet,
+    /// Current enemy ids, rebuilt once per tick (recipient-independent).
+    current_ids: IdBitSet,
+    /// id → baseline index, `-1` = absent. Sized for the full u16 id space;
+    /// `select_for_delta` fills and resets the entries it touches.
+    baseline_index: Vec<i32>,
     encode_buf: Vec<u8>,
+}
+
+impl Default for BroadcastScratch {
+    fn default() -> Self {
+        Self {
+            selected_enemies: Vec::new(),
+            scored: Vec::new(),
+            changed: Vec::new(),
+            removed: Vec::new(),
+            added: Vec::new(),
+            included: IdBitSet::new(),
+            current_ids: IdBitSet::new(),
+            baseline_index: vec![-1; 1 << 16],
+            encode_buf: Vec::new(),
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -65,6 +82,12 @@ pub fn broadcast_snapshot(
     let fires_count = snap.recent_fire_events.len().min(16);
     let fires_bytes = 1 + fires_count * FIRE_EVENT_BYTES;
     let fixed_overhead = 1 /* msg_type */ + SNAPSHOT_HEADER_BYTES + players_bytes + fires_bytes;
+
+    // Recipient-independent: build the current-id set once for all recipients.
+    work.current_ids.clear();
+    for e in snap.enemies.iter() {
+        work.current_ids.insert(e.id);
+    }
 
     for pid in 0..MAX_PLAYERS as u8 {
         let Some(client_id) = slots.slot_client(pid) else {
@@ -135,6 +158,7 @@ pub fn broadcast_snapshot(
                 baseline,
                 anchor,
                 &rstate.confirmed_ids,
+                &work.current_ids,
                 &rstate.ticks_since_last_sent,
                 enemy_budget,
                 &mut work.changed,
@@ -142,7 +166,6 @@ pub fn broadcast_snapshot(
                 &mut work.added,
                 &mut work.included,
                 &mut work.scored,
-                &mut work.current_ids,
                 &mut work.baseline_index,
             );
             write_delta_snapshot_body(

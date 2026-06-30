@@ -145,7 +145,7 @@ mod tests {
         ));
     }
 
-    fn spawn_enemy(app: &mut App, id: u16, x: f32, y: f32) {
+    fn spawn_enemy(app: &mut App, id: u32, x: f32, y: f32) {
         app.world_mut()
             .spawn((Enemy, EnemyId(id), Pos2D { x, y }, Vel2D { x: 0.0, y: 0.0 }));
     }
@@ -176,10 +176,10 @@ mod tests {
 
     /// Sorted (id, pos_x_mm, pos_y_mm) of all live enemies — quantized so the
     /// comparison is robust to sub-mm float noise.
-    fn enemy_snapshot(app: &mut App) -> Vec<(u16, i32, i32)> {
+    fn enemy_snapshot(app: &mut App) -> Vec<(u32, i32, i32)> {
         let world = app.world_mut();
         let mut q = world.query_filtered::<(&EnemyId, &Pos2D), With<Enemy>>();
-        let mut v: Vec<(u16, i32, i32)> = q
+        let mut v: Vec<(u32, i32, i32)> = q
             .iter(world)
             .map(|(id, p)| (id.0, (p.x * 1000.0).round() as i32, (p.y * 1000.0).round() as i32))
             .collect();

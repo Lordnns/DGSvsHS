@@ -11,25 +11,42 @@
 // seek/integrate/contact run this tick), matching the DOTS ECB playback inside
 // RewindResolveSystem.OnUpdate.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use super::components::*;
 use crate::game::constants::*;
-use crate::game::spatial::Pos2D;
+use crate::game::spatial::{GridGeom, Pos2D};
 use crate::game::types::FireEvent;
 
 // ---------- Ring ----------
 
+/// One tick of enemy history, spatially bucketed so `resolve_fire` only scans
+/// cells along the beam instead of every enemy. `cells` holds (id, pos) by
+/// `GridGeom` cell; `by_id` is the O(1) cross-frame lookup the bracketing
+/// lerp + floor/ceil membership tests need. Enemies are arena-clamped inside
+/// the grid extent, so none fall out of bounds.
 pub struct RewindFrame {
     pub tick: u32,
-    pub enemies: Vec<(u16, Vec2)>,
+    cells: Vec<Vec<(u32, Vec2)>>,
+    by_id: HashMap<u32, Vec2>,
+}
+
+impl RewindFrame {
+    fn new(geom: &GridGeom) -> Self {
+        Self {
+            tick: 0,
+            cells: (0..geom.cell_count()).map(|_| Vec::new()).collect(),
+            by_id: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Resource)]
 pub struct RewindRing {
     frames: Vec<RewindFrame>,
+    geom: GridGeom,
     head: usize,
     count: usize,
     cap: usize,
@@ -37,14 +54,11 @@ pub struct RewindRing {
 
 impl RewindRing {
     pub fn new(cap: usize) -> Self {
-        let frames = (0..cap)
-            .map(|_| RewindFrame {
-                tick: 0,
-                enemies: Vec::new(),
-            })
-            .collect();
+        let geom = GridGeom::from_constants();
+        let frames = (0..cap).map(|_| RewindFrame::new(&geom)).collect();
         Self {
             frames,
+            geom,
             head: 0,
             count: 0,
             cap,
@@ -52,12 +66,21 @@ impl RewindRing {
     }
 
     /// Overwrite the head slot with this tick's enemy positions and advance.
-    /// Reuses the slot's Vec to avoid per-tick reallocation.
-    pub fn record(&mut self, tick: u32, it: impl Iterator<Item = (u16, Vec2)>) {
+    /// Reuses the slot's per-cell Vecs + map allocation to avoid per-tick churn.
+    pub fn record(&mut self, tick: u32, it: impl Iterator<Item = (u32, Vec2)>) {
+        let geom = self.geom;
         let slot = &mut self.frames[self.head];
         slot.tick = tick;
-        slot.enemies.clear();
-        slot.enemies.extend(it);
+        for cell in &mut slot.cells {
+            cell.clear();
+        }
+        slot.by_id.clear();
+        for (id, pos) in it {
+            slot.by_id.insert(id, pos);
+            if let Some((cx, cy)) = geom.cell_coords(pos.x, pos.y) {
+                slot.cells[geom.cell_idx(cx, cy)].push((id, pos));
+            }
+        }
         self.head = (self.head + 1) % self.cap;
         if self.count < self.cap {
             self.count += 1;
@@ -118,55 +141,82 @@ impl RewindRing {
         }
     }
 
-    /// Resolve one fire against the interpolated set. Adds newly killed enemy
-    /// ids to `kills` (only ids present in `alive`, i.e. still in the current
-    /// world) and returns how many THIS beam newly killed (shared kill set, so
-    /// an enemy already killed by an earlier beam this tick isn't recounted —
-    /// matching the DOTS shared KillFlags).
+    /// Resolve one fire against the interpolated set. Claims every enemy id the
+    /// beam hits into the shared `kill_owner` map (id → index of the FIRST beam
+    /// to hit it, so an enemy hit by an earlier beam this tick isn't re-claimed
+    /// — matching the DOTS shared KillFlags). Returns how many ids THIS beam
+    /// newly claimed. Liveness is NOT checked here: the caller's single query
+    /// pass (`tally_kills`) filters claims down to enemies still in the world,
+    /// which yields the same despawns + per-beam counts as gating here would.
     pub fn resolve_fire(
         &self,
         fire: &PendingFire,
         view_tick_f: f32,
-        alive: &HashMap<u16, Entity>,
-        kills: &mut HashSet<u16>,
+        fire_index: usize,
+        kill_owner: &mut HashMap<u32, usize>,
     ) -> u32 {
         let Some((floor_i, ceil_i, alpha)) = self.bracket(view_tick_f) else {
             return 0;
         };
         let floor = &self.frames[floor_i];
         let ceil = &self.frames[ceil_i];
+        let same = floor_i == ceil_i;
         let hit_r = ENEMY_RADIUS + BEAM_RADIUS;
         let hit_r_sq = hit_r * hit_r;
+
+        // Candidate cells: the beam AABB expanded by the hit radius PLUS one
+        // cell. The extra cell covers the bracketing lerp — an enemy is bucketed
+        // by its floor/ceil position but hit-tested at the lerped position, and
+        // inter-frame movement (one tick, ≪ cell size) can nudge it across a
+        // cell boundary. The narrow-phase `segment_hits` still filters exactly,
+        // so the wider scan only adds candidates, never changes the result.
+        let end = fire.origin + fire.dir * BULLET_MAX_RANGE;
+        let query_r = hit_r + self.geom.cell_size;
+        let Some((cxmin, cymin, cxmax, cymax)) =
+            self.geom
+                .segment_cell_range(fire.origin.x, fire.origin.y, end.x, end.y, query_r)
+        else {
+            return 0;
+        };
+
         let mut local = 0u32;
 
         // Floor-frame enemies; lerp with ceil if the same id is present there.
         // Floor-only enemies (died mid-bracket) stay at floor.pos.
-        for (id, fpos) in &floor.enemies {
-            let mut pos = *fpos;
-            if floor_i != ceil_i {
-                if let Some((_, cpos)) = ceil.enemies.iter().find(|(cid, _)| cid == id) {
-                    pos = fpos.lerp(*cpos, alpha);
+        for cy in cymin..=cymax {
+            for cx in cxmin..=cxmax {
+                let cell = &floor.cells[self.geom.cell_idx(cx, cy)];
+                for (id, fpos) in cell {
+                    let mut pos = *fpos;
+                    if !same {
+                        if let Some(cpos) = ceil.by_id.get(id) {
+                            pos = fpos.lerp(*cpos, alpha);
+                        }
+                    }
+                    if segment_hits(fire.origin, fire.dir, BULLET_MAX_RANGE, pos, hit_r_sq)
+                        && claim(kill_owner, *id, fire_index)
+                    {
+                        local += 1;
+                    }
                 }
-            }
-            if segment_hits(fire.origin, fire.dir, BULLET_MAX_RANGE, pos, hit_r_sq)
-                && alive.contains_key(id)
-                && kills.insert(*id)
-            {
-                local += 1;
             }
         }
 
         // Ceil-only enemies (spawned mid-bracket) included only if alpha ≥ 0.5.
-        if alpha >= 0.5 && floor_i != ceil_i {
-            for (id, cpos) in &ceil.enemies {
-                if floor.enemies.iter().any(|(fid, _)| fid == id) {
-                    continue;
-                }
-                if segment_hits(fire.origin, fire.dir, BULLET_MAX_RANGE, *cpos, hit_r_sq)
-                    && alive.contains_key(id)
-                    && kills.insert(*id)
-                {
-                    local += 1;
+        if alpha >= 0.5 && !same {
+            for cy in cymin..=cymax {
+                for cx in cxmin..=cxmax {
+                    let cell = &ceil.cells[self.geom.cell_idx(cx, cy)];
+                    for (id, cpos) in cell {
+                        if floor.by_id.contains_key(id) {
+                            continue;
+                        }
+                        if segment_hits(fire.origin, fire.dir, BULLET_MAX_RANGE, *cpos, hit_r_sq)
+                            && claim(kill_owner, *id, fire_index)
+                        {
+                            local += 1;
+                        }
+                    }
                 }
             }
         }
@@ -196,53 +246,92 @@ fn segment_hits(origin: Vec2, dir: Vec2, max_range: f32, enemy: Vec2, hit_radius
     (enemy - closest).length_squared() <= hit_radius_sq
 }
 
+/// First-claim-wins: record that beam `fire_index` hit enemy `id`, unless an
+/// earlier beam already claimed it. Returns true only on the first claim.
+fn claim(kill_owner: &mut HashMap<u32, usize>, id: u32, fire_index: usize) -> bool {
+    use std::collections::hash_map::Entry;
+    match kill_owner.entry(id) {
+        Entry::Vacant(slot) => {
+            slot.insert(fire_index);
+            true
+        }
+        Entry::Occupied(_) => false,
+    }
+}
+
+/// Single pass over the live enemy set: for each enemy whose id was claimed,
+/// tally the kill to its owning beam and mark its entity for despawn. Pure +
+/// generic over the entity type so it's testable without a `World`. This is
+/// where liveness is enforced — claimed ids with no live enemy simply produce
+/// no kill and no despawn.
+fn tally_kills<E>(
+    kill_owner: &HashMap<u32, usize>,
+    live: impl Iterator<Item = (E, u32)>,
+    fire_count: usize,
+) -> (Vec<u32>, Vec<E>) {
+    let mut counts = vec![0u32; fire_count];
+    let mut to_despawn = Vec::new();
+    for (entity, id) in live {
+        if let Some(&fi) = kill_owner.get(&id) {
+            counts[fi] += 1;
+            to_despawn.push(entity);
+        }
+    }
+    (counts, to_despawn)
+}
+
 // ---------- Systems ----------
 
-/// Step 4: resolve queued fires against the rewind ring; despawn kills now.
-pub fn rewind_resolve(world: &mut World) {
-    let pending = std::mem::take(&mut world.resource_mut::<PendingFires>().0);
+/// Step 4: resolve queued fires against the rewind ring; queue kill despawns.
+///
+/// Normal (non-exclusive) system: despawns go through `Commands`, batched at the
+/// schedule's sync point rather than mutating archetypes mid-frame. The kill
+/// therefore lands one tick later — accepted here (an enemy lives one extra
+/// tick) in exchange for not paying a structural-change stall per beam hit.
+pub fn rewind_resolve(
+    mut pending_fires: ResMut<PendingFires>,
+    clock: Res<WorldClock>,
+    rtt: Res<PlayerRtt>,
+    ring: Res<RewindRing>,
+    mut fire_events: ResMut<FireEvents>,
+    mut commands: Commands,
+    enemies: Query<(Entity, &EnemyId), With<Enemy>>,
+) {
+    let pending = std::mem::take(&mut pending_fires.0);
     if pending.is_empty() {
         return;
     }
+    let current_tick = clock.0;
 
-    let current_tick = world.resource::<WorldClock>().0;
-    let rtt = world.resource::<PlayerRtt>().0;
-
-    // Current alive enemies: id → entity. Kills are applied to this set by id.
-    let alive: HashMap<u16, Entity> = world
-        .query_filtered::<(Entity, &EnemyId), With<Enemy>>()
-        .iter(world)
-        .map(|(e, id)| (id.0, e))
-        .collect();
-
-    let mut kills: HashSet<u16> = HashSet::new();
-    let mut fire_events: Vec<FireEvent> = Vec::with_capacity(pending.len());
-
-    {
-        let ring = world.resource::<RewindRing>();
-        for f in &pending {
-            let one_way = 0.5 * rtt.get(f.player_id as usize).copied().unwrap_or(60.0);
-            let view_tick_f = compute_view_tick_f(current_tick, one_way);
-            let local = ring.resolve_fire(f, view_tick_f, &alive, &mut kills);
-            fire_events.push(FireEvent {
-                tick: current_tick,
-                shooter_id: f.player_id,
-                origin_x: f.origin.x,
-                origin_y: f.origin.y,
-                dir_x: f.dir.x,
-                dir_y: f.dir.y,
-                distance: BULLET_MAX_RANGE,
-                kill_count: local.min(255) as u8,
-            });
-        }
+    // Beam pass: claim every hit id into a small map (id → first beam to hit
+    // it). Size is bounded by enemies near beams, not the world total.
+    let mut kill_owner: HashMap<u32, usize> = HashMap::new();
+    for (fi, f) in pending.iter().enumerate() {
+        let one_way = 0.5 * rtt.0.get(f.player_id as usize).copied().unwrap_or(60.0);
+        let view_tick_f = compute_view_tick_f(current_tick, one_way);
+        ring.resolve_fire(f, view_tick_f, fi, &mut kill_owner);
     }
 
-    for id in &kills {
-        if let Some(e) = alive.get(id) {
-            world.despawn(*e);
-        }
+    // One query pass owns id→entity + liveness: tally live claims per beam and
+    // collect the entities to despawn.
+    let (counts, to_despawn) =
+        tally_kills(&kill_owner, enemies.iter().map(|(e, id)| (e, id.0)), pending.len());
+    for e in to_despawn {
+        commands.entity(e).despawn();
     }
-    world.resource_mut::<FireEvents>().0.extend(fire_events);
+
+    fire_events
+        .0
+        .extend(pending.iter().enumerate().map(|(fi, f)| FireEvent {
+            tick: current_tick,
+            shooter_id: f.player_id,
+            origin_x: f.origin.x,
+            origin_y: f.origin.y,
+            dir_x: f.dir.x,
+            dir_y: f.dir.y,
+            distance: BULLET_MAX_RANGE,
+            kill_count: counts[fi].min(255) as u8,
+        }));
 }
 
 /// Step 8: record post-integrate enemy positions into the ring for this tick.
@@ -260,10 +349,6 @@ pub fn rewind_record(
 mod tests {
     use super::*;
 
-    fn ent(id: u32) -> Entity {
-        Entity::from_raw_u32(id).unwrap()
-    }
-
     fn beam_along_x() -> PendingFire {
         PendingFire {
             player_id: 0,
@@ -276,75 +361,104 @@ mod tests {
     #[test]
     fn lerps_between_bracketing_frames() {
         let mut ring = RewindRing::new(8);
-        ring.record(10, [(1u16, Vec2::new(10.0, 0.0))].into_iter());
-        ring.record(11, [(1u16, Vec2::new(8.0, 0.0))].into_iter());
+        ring.record(10, [(1u32, Vec2::new(10.0, 0.0))].into_iter());
+        ring.record(11, [(1u32, Vec2::new(8.0, 0.0))].into_iter());
 
         // view 10.5 → enemy at lerp((10,0),(8,0),0.5) = (9,0); beam on x-axis hits.
-        let alive = HashMap::from([(1u16, ent(1))]);
-        let mut kills = HashSet::new();
-        let local = ring.resolve_fire(&beam_along_x(), 10.5, &alive, &mut kills);
+        let mut owner = HashMap::new();
+        let local = ring.resolve_fire(&beam_along_x(), 10.5, 0, &mut owner);
         assert_eq!(local, 1);
-        assert!(kills.contains(&1));
+        assert!(owner.contains_key(&1));
     }
 
     #[test]
     fn clamps_to_oldest_when_view_precedes_buffer() {
         let mut ring = RewindRing::new(8);
-        ring.record(10, [(1u16, Vec2::new(10.0, 0.0))].into_iter());
-        ring.record(11, [(1u16, Vec2::new(8.0, 0.0))].into_iter());
+        ring.record(10, [(1u32, Vec2::new(10.0, 0.0))].into_iter());
+        ring.record(11, [(1u32, Vec2::new(8.0, 0.0))].into_iter());
 
         // view 3.0 is older than the oldest frame (tick 10) → clamp to tick 10.
-        let alive = HashMap::from([(1u16, ent(1))]);
-        let mut kills = HashSet::new();
-        let local = ring.resolve_fire(&beam_along_x(), 3.0, &alive, &mut kills);
+        let mut owner = HashMap::new();
+        let local = ring.resolve_fire(&beam_along_x(), 3.0, 0, &mut owner);
         assert_eq!(local, 1);
     }
 
     #[test]
-    fn dead_enemy_not_in_alive_is_not_killed() {
-        let mut ring = RewindRing::new(8);
-        ring.record(10, [(1u16, Vec2::new(10.0, 0.0))].into_iter());
-        // Enemy id 1 is in the ring but NOT in the current alive set.
-        let alive: HashMap<u16, Entity> = HashMap::new();
-        let mut kills = HashSet::new();
-        let local = ring.resolve_fire(&beam_along_x(), 10.0, &alive, &mut kills);
-        assert_eq!(local, 0);
-        assert!(kills.is_empty());
+    fn claimed_id_with_no_live_enemy_is_not_killed_or_counted() {
+        // An enemy hit in the ring but already gone from the world: it's claimed
+        // but `tally_kills` finds no live entity → no kill, no despawn. This is
+        // the liveness gate that used to live in `resolve_fire`.
+        let owner = HashMap::from([(1u32, 0usize)]);
+        let live: [(u32, u32); 0] = []; // (entity, id) — empty world
+        let (counts, to_despawn) = tally_kills(&owner, live.into_iter(), 1);
+        assert_eq!(counts, vec![0]);
+        assert!(to_despawn.is_empty());
+    }
+
+    #[test]
+    fn tally_attributes_each_kill_to_its_owning_beam() {
+        // Beam 0 claimed id 1, beam 1 claimed id 2; id 3 was never claimed.
+        let owner = HashMap::from([(1u32, 0usize), (2u32, 1usize)]);
+        // Fake entities as u32; (entity, id) pairs of the live world.
+        let live = [(10u32, 1u32), (20u32, 2u32), (30u32, 3u32)];
+        let (counts, to_despawn) = tally_kills(&owner, live.into_iter(), 2);
+        assert_eq!(counts, vec![1, 1]);
+        assert_eq!(to_despawn, vec![10, 20]); // id 3's entity is untouched
     }
 
     #[test]
     fn off_axis_enemy_is_missed() {
         let mut ring = RewindRing::new(8);
         // 5 m off the beam axis — well outside enemy+beam radius.
-        ring.record(10, [(1u16, Vec2::new(10.0, 5.0))].into_iter());
-        let alive = HashMap::from([(1u16, ent(1))]);
-        let mut kills = HashSet::new();
-        let local = ring.resolve_fire(&beam_along_x(), 10.0, &alive, &mut kills);
+        ring.record(10, [(1u32, Vec2::new(10.0, 5.0))].into_iter());
+        let mut owner = HashMap::new();
+        let local = ring.resolve_fire(&beam_along_x(), 10.0, 0, &mut owner);
         assert_eq!(local, 0);
+        assert!(owner.is_empty());
     }
 
     #[test]
-    fn piercing_kills_all_in_path_once() {
+    fn enemy_in_distant_cell_is_not_hit() {
+        // Enemy far from the beam (but in-grid): its cell isn't scanned, and the
+        // narrow phase wouldn't hit it anyway. Guards the spatial-cull path.
         let mut ring = RewindRing::new(8);
         ring.record(
             10,
             [
-                (1u16, Vec2::new(3.0, 0.0)),
-                (2u16, Vec2::new(6.0, 0.0)),
-                (3u16, Vec2::new(9.0, 0.0)),
-                (4u16, Vec2::new(6.0, 4.0)), // off-axis decoy
+                (1u32, Vec2::new(5.0, 0.0)),   // on the beam → claimed
+                (2u32, Vec2::new(20.0, 20.0)), // distant corner → missed
             ]
             .into_iter(),
         );
-        let alive = HashMap::from([(1u16, ent(1)), (2u16, ent(2)), (3u16, ent(3)), (4u16, ent(4))]);
-        let mut kills = HashSet::new();
-        let local = ring.resolve_fire(&beam_along_x(), 10.0, &alive, &mut kills);
-        assert_eq!(local, 3);
-        assert!(kills.contains(&1) && kills.contains(&2) && kills.contains(&3));
-        assert!(!kills.contains(&4));
+        let mut owner = HashMap::new();
+        let local = ring.resolve_fire(&beam_along_x(), 10.0, 0, &mut owner);
+        assert_eq!(local, 1);
+        assert!(owner.contains_key(&1) && !owner.contains_key(&2));
+    }
 
-        // A second beam over the same already-killed enemies adds no new kills.
-        let local2 = ring.resolve_fire(&beam_along_x(), 10.0, &alive, &mut kills);
+    #[test]
+    fn piercing_claims_all_in_path_once() {
+        let mut ring = RewindRing::new(8);
+        ring.record(
+            10,
+            [
+                (1u32, Vec2::new(3.0, 0.0)),
+                (2u32, Vec2::new(6.0, 0.0)),
+                (3u32, Vec2::new(9.0, 0.0)),
+                (4u32, Vec2::new(6.0, 4.0)), // off-axis decoy
+            ]
+            .into_iter(),
+        );
+        let mut owner = HashMap::new();
+        let local = ring.resolve_fire(&beam_along_x(), 10.0, 0, &mut owner);
+        assert_eq!(local, 3);
+        assert!(owner.contains_key(&1) && owner.contains_key(&2) && owner.contains_key(&3));
+        assert!(!owner.contains_key(&4));
+
+        // A second beam over the same already-claimed enemies claims nothing new,
+        // and leaves ownership with the first beam.
+        let local2 = ring.resolve_fire(&beam_along_x(), 10.0, 1, &mut owner);
         assert_eq!(local2, 0);
+        assert_eq!(owner[&1], 0);
     }
 }
