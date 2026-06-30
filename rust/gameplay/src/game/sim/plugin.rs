@@ -19,6 +19,7 @@ use super::rewind::{rewind_record, rewind_resolve, RewindRing};
 use super::round::round_director;
 use super::DeterministicRng;
 use crate::game::constants::{SNAPSHOT_HISTORY_TICKS, TICKS_PER_SECOND};
+use crate::game::spatial::EnemyGrid;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
@@ -64,6 +65,9 @@ impl Plugin for SimPlugin {
             .insert_resource(ProcessedInputTick::default())
             .insert_resource(PlayerRtt::default())
             .insert_resource(RewindRing::new(SNAPSHOT_HISTORY_TICKS))
+            // Spatial grid for player↔enemy contact (rebuilt each tick in
+            // player_enemy_contact). SpatialPlugin isn't used; only the resource.
+            .insert_resource(EnemyGrid::new())
             .insert_resource(Time::<Fixed>::from_hz(TICKS_PER_SECOND as f64));
 
         app.configure_sets(
@@ -115,6 +119,7 @@ fn sim_running(state: Res<Lifecycle>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avian2d::prelude::{LinearVelocity, Position};
     use crate::game::constants::*;
     use crate::game::spatial::{Pos2D, Vel2D};
     use crate::game::types::{InputCmd, RoundPhase};
@@ -145,9 +150,17 @@ mod tests {
         ));
     }
 
-    fn spawn_enemy(app: &mut App, id: u16, x: f32, y: f32) {
-        app.world_mut()
-            .spawn((Enemy, EnemyId(id), Pos2D { x, y }, Vel2D { x: 0.0, y: 0.0 }));
+    fn spawn_enemy(app: &mut App, id: u32, x: f32, y: f32) {
+        // Position + LinearVelocity so sync_physics_to_pos2d (which now builds
+        // the contact grid) matches these enemies, like the real archetype.
+        app.world_mut().spawn((
+            Enemy,
+            EnemyId(id),
+            Pos2D { x, y },
+            Vel2D { x: 0.0, y: 0.0 },
+            Position(Vec2::new(x, y)),
+            LinearVelocity(Vec2::ZERO),
+        ));
     }
 
     fn kickoff(app: &mut App) {
@@ -176,10 +189,10 @@ mod tests {
 
     /// Sorted (id, pos_x_mm, pos_y_mm) of all live enemies — quantized so the
     /// comparison is robust to sub-mm float noise.
-    fn enemy_snapshot(app: &mut App) -> Vec<(u16, i32, i32)> {
+    fn enemy_snapshot(app: &mut App) -> Vec<(u32, i32, i32)> {
         let world = app.world_mut();
         let mut q = world.query_filtered::<(&EnemyId, &Pos2D), With<Enemy>>();
-        let mut v: Vec<(u16, i32, i32)> = q
+        let mut v: Vec<(u32, i32, i32)> = q
             .iter(world)
             .map(|(id, p)| (id.0, (p.x * 1000.0).round() as i32, (p.y * 1000.0).round() as i32))
             .collect();

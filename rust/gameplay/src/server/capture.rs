@@ -70,7 +70,9 @@ pub fn snapshot_capture(
     let mut enemy_count = 0u32;
     for (id, pos) in enemies.iter() {
         s.enemies.push(EnemySnap {
-            id: id.0,
+            // Wire id is u16; sim id is u32. Truncates past 65535 (ids alias on
+            // the wire) — acceptable until the wire + C# legs widen to u32.
+            id: id.0 as u16,
             pos_x: pos.x,
             pos_y: pos.y,
         });

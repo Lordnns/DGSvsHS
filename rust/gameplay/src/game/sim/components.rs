@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use super::DeterministicRng;
 use crate::game::constants::MAX_PLAYERS;
-use crate::game::spatial::{Pos2D, Vel2D};
+use crate::game::spatial::Pos2D;
 use crate::game::types::{FireEvent, InputCmd, RoundPhase};
 
 // ---------- Enemy archetype ----------
@@ -18,8 +18,12 @@ use crate::game::types::{FireEvent, InputCmd, RoundPhase};
 #[derive(Component)]
 pub struct Enemy;
 
+// u32 so the simulation can exceed the u16 ceiling (MaxEnemies = 131072 and
+// ids are global + monotonic over a match). The wire still encodes ids as u16
+// (cast in snapshot_capture) — see CLAUDE.md: end-to-end >65535 needs the wire
+// + C# legs widened too.
 #[derive(Component, Copy, Clone, Debug)]
-pub struct EnemyId(pub u16);
+pub struct EnemyId(pub u32);
 
 // ---------- Player archetype ----------
 
@@ -83,7 +87,7 @@ impl Default for RoundState {
 pub struct SimRng(pub DeterministicRng);
 
 #[derive(Resource, Default, Copy, Clone)]
-pub struct NextEnemyId(pub u16);
+pub struct NextEnemyId(pub u32);
 
 #[derive(Resource, Default, Copy, Clone)]
 pub struct GodMode(pub bool);

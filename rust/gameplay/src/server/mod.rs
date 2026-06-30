@@ -4,6 +4,7 @@
 // csharp_arch_server/Server/* and csharp_arch_server/Net/SnapshotPriority.cs +
 // the BroadcastSnapshot path from csharp_arch_server/Net/QuicServer.cs.
 
+pub mod bitset;
 pub mod broadcast;
 pub mod capture;
 pub mod history;
