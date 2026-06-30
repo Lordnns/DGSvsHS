@@ -41,13 +41,6 @@ pub fn round_director(world: &mut World) {
         return;
     }
 
-    // Live enemy entities (collected before this tick's spawns, like the DOTS
-    // immediate-count path: at round end no spawn happens, so this is exact).
-    let enemy_ents: Vec<Entity> = world
-        .query_filtered::<Entity, With<Enemy>>()
-        .iter(world)
-        .collect();
-
     let mut rng = *world.resource::<SimRng>();
     let mut next_id = world.resource::<NextEnemyId>().0;
 
@@ -85,7 +78,12 @@ pub fn round_director(world: &mut World) {
                 despawn_all = true;
                 reenable_players = true;
                 spawns.clear();
-            } else if round.spawns_remaining == 0 && enemy_ents.is_empty() {
+            } else if round.spawns_remaining == 0 && !any_enemy_exists(world) {
+                // Existence check only — avoids materializing the whole enemy
+                // set every tick. Queried before this tick's spawns are applied
+                // below, matching the DOTS immediate-count path (at round end no
+                // spawn happens, so this is exact). Short-circuited by
+                // `spawns_remaining == 0`, so it never runs mid-wave.
                 round.phase = RoundPhase::InterRound;
                 round.inter_round_timer = INTER_ROUND_DELAY_SEC;
             }
@@ -100,7 +98,15 @@ pub fn round_director(world: &mut World) {
     world.resource_mut::<NextEnemyId>().0 = next_id;
 
     if despawn_all {
-        for e in enemy_ents {
+        // Rare (team-wipe) path: now collect the enemies to despawn. The set is
+        // unchanged since the start of this function (spawns are deferred to the
+        // branch below), so re-querying yields the same entities the old upfront
+        // collect did.
+        let ents: Vec<Entity> = world
+            .query_filtered::<Entity, With<Enemy>>()
+            .iter(world)
+            .collect();
+        for e in ents {
             world.despawn(e);
         }
     } else {
@@ -136,6 +142,16 @@ pub fn round_director(world: &mut World) {
             }
         }
     }
+}
+
+/// True if at least one `Enemy` entity exists. O(1) — advances the query
+/// iterator once instead of materializing the whole set.
+fn any_enemy_exists(world: &mut World) -> bool {
+    world
+        .query_filtered::<(), With<Enemy>>()
+        .iter(world)
+        .next()
+        .is_some()
 }
 
 fn start_wave(round: &mut RoundState) {
