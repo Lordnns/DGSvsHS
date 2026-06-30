@@ -19,6 +19,7 @@ use super::rewind::{rewind_record, rewind_resolve, RewindRing};
 use super::round::round_director;
 use super::DeterministicRng;
 use crate::game::constants::{SNAPSHOT_HISTORY_TICKS, TICKS_PER_SECOND};
+use crate::game::spatial::EnemyGrid;
 
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SimSet {
@@ -64,6 +65,9 @@ impl Plugin for SimPlugin {
             .insert_resource(ProcessedInputTick::default())
             .insert_resource(PlayerRtt::default())
             .insert_resource(RewindRing::new(SNAPSHOT_HISTORY_TICKS))
+            // Spatial grid for player↔enemy contact (rebuilt each tick in
+            // player_enemy_contact). SpatialPlugin isn't used; only the resource.
+            .insert_resource(EnemyGrid::new())
             .insert_resource(Time::<Fixed>::from_hz(TICKS_PER_SECOND as f64));
 
         app.configure_sets(
@@ -115,6 +119,7 @@ fn sim_running(state: Res<Lifecycle>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avian2d::prelude::{LinearVelocity, Position};
     use crate::game::constants::*;
     use crate::game::spatial::{Pos2D, Vel2D};
     use crate::game::types::{InputCmd, RoundPhase};
@@ -146,8 +151,16 @@ mod tests {
     }
 
     fn spawn_enemy(app: &mut App, id: u32, x: f32, y: f32) {
-        app.world_mut()
-            .spawn((Enemy, EnemyId(id), Pos2D { x, y }, Vel2D { x: 0.0, y: 0.0 }));
+        // Position + LinearVelocity so sync_physics_to_pos2d (which now builds
+        // the contact grid) matches these enemies, like the real archetype.
+        app.world_mut().spawn((
+            Enemy,
+            EnemyId(id),
+            Pos2D { x, y },
+            Vel2D { x: 0.0, y: 0.0 },
+            Position(Vec2::new(x, y)),
+            LinearVelocity(Vec2::ZERO),
+        ));
     }
 
     fn kickoff(app: &mut App) {

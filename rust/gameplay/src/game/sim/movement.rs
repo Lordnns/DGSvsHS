@@ -7,7 +7,7 @@ use bevy::prelude::*;
 
 use super::components::*;
 use crate::game::constants::*;
-use crate::game::spatial::{Pos2D, Vel2D};
+use crate::game::spatial::{EnemyGrid, Pos2D, Vel2D};
 
 const AIM_EPS_SQ: f32 = 0.0001;
 
@@ -166,11 +166,27 @@ pub fn sync_pos2d_to_physics(
 }
 
 pub fn sync_physics_to_pos2d(
-    mut q: Query<(&mut Pos2D, &mut Vel2D, &mut Position, &mut LinearVelocity, Has<Player>)>,
+    god: Res<GodMode>,
+    mut grid: ResMut<EnemyGrid>,
+    mut q: Query<(
+        Entity,
+        &mut Pos2D,
+        &mut Vel2D,
+        &mut Position,
+        &mut LinearVelocity,
+        Has<Player>,
+    )>,
 ) {
     let enemy_max = ARENA_RADIUS - ENEMY_RADIUS;
     let player_max = ARENA_RADIUS - PLAYER_RADIUS;
-    for (mut pos2d, mut vel2d, mut position, mut lv, is_player) in q.iter_mut() {
+    // Rebuild the enemy spatial grid in the SAME pass that lands final
+    // positions, so player_enemy_contact (next set) can query it without a
+    // second O(N) traversal. Skipped in god mode, where contact is a no-op.
+    let maintain_grid = !god.0;
+    if maintain_grid {
+        grid.clear();
+    }
+    for (entity, mut pos2d, mut vel2d, mut position, mut lv, is_player) in q.iter_mut() {
         let max_r = if is_player { player_max } else { enemy_max };
         let r = position.0.length();
         if r > max_r {
@@ -184,14 +200,18 @@ pub fn sync_physics_to_pos2d(
         // directly; we don't want residual velocity bleeding into next tick).
         if is_player {
             lv.0 = Vec2::ZERO;
+        } else if maintain_grid {
+            grid.insert(entity, *pos2d);
         }
     }
 }
 
 pub fn player_enemy_contact(
     god: Res<GodMode>,
+    grid: Res<EnemyGrid>,
     enemies: Query<&Pos2D, With<Enemy>>,
     mut players: Query<(&Pos2D, &mut DisableTimer, &Alive), With<Player>>,
+    mut candidates: Local<Vec<Entity>>,
 ) {
     if god.0 {
         return;
@@ -199,15 +219,21 @@ pub fn player_enemy_contact(
     let kill_r = PLAYER_KILL_RADIUS + ENEMY_RADIUS;
     let kill_r_sq = kill_r * kill_r;
 
-    let enemy_pos: Vec<Vec2> = enemies.iter().map(pos_vec).collect();
-
+    // The grid was rebuilt this tick by sync_physics_to_pos2d. Query only the
+    // cells around each player, then narrow-phase the few candidates exactly.
     for (pos, mut dt, alive) in players.iter_mut() {
         if !alive.0 || dt.0 > 0.0 {
             continue;
         }
-        let p = pos_vec(pos);
-        for e in &enemy_pos {
-            if (*e - p).length_squared() <= kill_r_sq {
+        // Degenerate segment = point query of the kill-radius neighbourhood.
+        grid.collect_along_segment(pos.x, pos.y, pos.x, pos.y, kill_r, &mut candidates);
+        for &cand in candidates.iter() {
+            let Ok(ep) = enemies.get(cand) else {
+                continue;
+            };
+            let dx = ep.x - pos.x;
+            let dy = ep.y - pos.y;
+            if dx * dx + dy * dy <= kill_r_sq {
                 dt.0 = DISABLE_DURATION_SEC;
                 break;
             }
