@@ -6,7 +6,6 @@
 // one `Vec<Vec<Entity>>` resource, rebuilt from the ECS in PostStartup
 // (static stress) and PreUpdate (once the sim moves).
 
-use bevy::log::info;
 use bevy::prelude::*;
 
 use super::constants::{GRID_CELL_SIZE, GRID_HALF_CELLS};

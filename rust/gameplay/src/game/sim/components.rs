@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use super::DeterministicRng;
 use crate::game::constants::MAX_PLAYERS;
-use crate::game::spatial::{Pos2D, Vel2D};
+use crate::game::spatial::Pos2D;
 use crate::game::types::{FireEvent, InputCmd, RoundPhase};
 
 // ---------- Enemy archetype ----------
