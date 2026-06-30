@@ -74,6 +74,9 @@ pub fn launch_server(cfg: ServerConfig) {
         .add_plugins(system_metrics::MicroSystemMetrics)
         .add_plugins(PhysicsPlugins::new(FixedUpdate))
         .insert_resource(Gravity(Vec2::ZERO))
+        // Cut Avian's per-step substep solve from the default 6 (see
+        // constants::PHYSICS_SUBSTEPS). Overrides Avian's init_resource default.
+        .insert_resource(SubstepCount(game::constants::PHYSICS_SUBSTEPS))
         .add_plugins(game::sim::SimPlugin {
             seed: cfg.seed,
             god_mode: cfg.god_mode,

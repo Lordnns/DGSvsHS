@@ -68,3 +68,13 @@ pub const ROUND_SPAWN_WINDOW_SEC: f32 = 18.0;
 // ---------- Spatial grid ----------
 pub const GRID_CELL_SIZE: f32 = 1.0;
 pub const GRID_HALF_CELLS: i32 = 28;
+
+// ---------- Physics (Avian) ----------
+// Avian's TGS-Soft solver runs the full contact solve once per substep, so this
+// is a direct multiplier on `run_substep_schedule` — the server's dominant cost
+// once the enemy swarm packs densely around the players. Avian's default is 6,
+// tuned for stacking/high-speed precision we don't have here (zero gravity, no
+// stacking, slow rotation-locked circles). 2 keeps enemy↔enemy separation crisp
+// at ~3x less solver work; 1 is likely fine for this workload (~6x) if the crowd
+// still looks acceptable. Avian-specific knob — no effect on RNG/wire/determinism.
+pub const PHYSICS_SUBSTEPS: u32 = 2;
